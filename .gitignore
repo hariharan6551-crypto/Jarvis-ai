@@ -1,0 +1,14 @@
+node_modules/
+dist/
+dist-electron/
+.env
+*.pyc
+__pycache__/
+backend/data/
+backend/logs/
+*.egg-info/
+.venv/
+venv/
+*.log
+.DS_Store
+Thumbs.db
