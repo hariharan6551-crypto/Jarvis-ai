@@ -479,9 +479,10 @@ class VoiceEngine:
 
     async def _broadcast_clap_event(self, event_type: str, jarvis_state: str):
         """Broadcast clap event to all connected WebSocket clients."""
+        log.info(f"Attempting to broadcast clap event: {event_type}. broadcast_fn is set: {self.broadcast_fn is not None}")
         if self.broadcast_fn:
             try:
-                await self.broadcast_fn({
+                payload = {
                     "type": "clap_event",
                     "data": {
                         "event": event_type,
@@ -492,9 +493,14 @@ class VoiceEngine:
                             else f"Going offline {settings.USER_NAME}. Call me anytime."
                         ),
                     },
-                })
+                }
+                log.info(f"Sending payload: {payload}")
+                await self.broadcast_fn(payload)
+                log.info("Successfully executed broadcast_fn for clap event")
             except Exception as e:
                 log.error(f"Broadcast clap event failed: {e}")
+        else:
+            log.warning("Cannot broadcast clap event: broadcast_fn is None")
 
     # ─── Wake Word Detection ──────────────────────────────────────────
 

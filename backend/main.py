@@ -63,14 +63,19 @@ connected_clients: list[WebSocket] = []
 
 async def broadcast_to_clients(message: dict):
     """Broadcast a dict message to all connected WebSocket clients."""
+    count = len(connected_clients)
+    log.info(f"Broadcasting to {count} WebSocket clients: {message.get('type', 'unknown')}")
     if not connected_clients:
+        log.warning("No WebSocket clients connected - broadcast skipped")
         return
     text = json.dumps(message)
     stale = []
     for ws in connected_clients:
         try:
             await ws.send_text(text)
-        except Exception:
+            log.info(f"Sent {message.get('type','')} event to client")
+        except Exception as e:
+            log.error(f"Failed to send to client: {e}")
             stale.append(ws)
     for ws in stale:
         try:
@@ -265,6 +270,8 @@ async def websocket_endpoint(ws: WebSocket):
     connected_clients.append(ws)
     log.info(f"WebSocket client connected ({len(connected_clients)} total)")
 
+    log.info(f"WebSocket client connected ({len(connected_clients)} total)")
+
     await send_ws(ws, "connected", {
         "message": f"Hello {settings.USER_NAME}, J.A.R.V.I.S is online.",
         "version": settings.APP_VERSION,
@@ -452,6 +459,31 @@ async def api_watchdog():
     if watchdog:
         return watchdog.get_status()
     return {"watchdog_running": False}
+
+
+@app.get("/api/ws-status")
+async def api_ws_status():
+    """Check WebSocket connection status."""
+    return {
+        "connected_clients": len(connected_clients),
+        "clap_detector_active": voice_engine is not None and voice_engine._mic_available,
+        "jarvis_active": voice_engine.jarvis_active if voice_engine else False,
+    }
+
+
+@app.get("/api/test-clap")
+async def api_test_clap():
+    """Test clap event broadcast to verify WebSocket pipeline works."""
+    msg = {
+        "type": "clap_event",
+        "data": {
+            "event": "single_clap",
+            "jarvis_active": True,
+            "message": f"Hey {settings.USER_NAME}, how can I help you?",
+        },
+    }
+    await broadcast_to_clients(msg)
+    return {"sent": True, "clients": len(connected_clients), "message": msg}
 
 
 # ═══════════════════════════════════════════════════════════════════════
