@@ -1,7 +1,10 @@
 import React, { useMemo } from 'react';
 import { motion } from 'framer-motion';
+import useStore from '../stores/useStore';
 
 export default function AICore({ state }) {
+  const jarvisActive = useStore(s => s.jarvisActive);
+
   const bars = useMemo(() => Array.from({ length: 32 }, (_, i) => {
     const active = state === 'listening' || state === 'speaking';
     const h = active ? 4 + Math.random() * 24 : 4 + Math.sin(i * 0.5) * 3;
@@ -28,9 +31,24 @@ export default function AICore({ state }) {
           ))}
         </div>
       </div>
+      {/* JARVIS active indicator */}
+      {jarvisActive && (
+        <motion.div
+          initial={{ opacity: 0, scale: 0.8 }}
+          animate={{ opacity: 1, scale: 1 }}
+          style={{
+            marginTop: 8, padding: '4px 14px', borderRadius: 20,
+            background: 'rgba(34,197,94,0.15)', border: '1px solid rgba(34,197,94,0.4)',
+            fontSize: 10, fontFamily: 'var(--font-display)', letterSpacing: 2,
+            color: '#22c55e', textAlign: 'center',
+          }}
+        >
+          ● ACTIVE — LISTENING
+        </motion.div>
+      )}
       <motion.div className="ai-status-text" key={state} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}>
-        {state === 'idle' && <><span className="greeting">Welcome back Hari.</span><br />All systems are operational.<br />How may I assist you today?</>}
-        {state === 'listening' && 'Listening...'}
+        {state === 'idle' && <><span className="greeting">Welcome back Hari.</span><br />All systems are operational.<br />Say "JARVIS" or clap to begin.</>}
+        {state === 'listening' && 'Listening... say your command'}
         {state === 'thinking' && 'Processing your command...'}
         {state === 'executing' && 'Executing command...'}
         {state === 'speaking' && 'Speaking...'}

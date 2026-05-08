@@ -61,6 +61,24 @@ system_monitor = None
 connected_clients: list[WebSocket] = []
 
 
+async def broadcast_to_clients(message: dict):
+    """Broadcast a dict message to all connected WebSocket clients."""
+    if not connected_clients:
+        return
+    text = json.dumps(message)
+    stale = []
+    for ws in connected_clients:
+        try:
+            await ws.send_text(text)
+        except Exception:
+            stale.append(ws)
+    for ws in stale:
+        try:
+            connected_clients.remove(ws)
+        except ValueError:
+            pass
+
+
 # ── Request Models ────────────────────────────────────────────────────
 class CommandRequest(BaseModel):
     text: str
@@ -100,6 +118,8 @@ async def startup():
     try:
         from voice.engine import VoiceEngine
         voice_engine = VoiceEngine()
+        # Wire broadcast function so clap/wake events reach frontend
+        voice_engine.broadcast_fn = broadcast_to_clients
         if health_monitor:
             health_monitor.register_engine("voice", voice_engine)
         log.info("✓ Voice engine initialized")
@@ -164,13 +184,17 @@ async def startup():
     except Exception as e:
         log.error(f"✗ AI health check failed: {e}")
 
-    # Step 7: Mic retry loop (if mic not found)
+    # Step 7: Mic retry loop OR auto-start clap detector
     try:
-        if voice_engine and not voice_engine._mic_available:
-            asyncio.create_task(voice_engine.start_mic_retry_loop())
-            log.info("✓ Mic retry loop started")
+        if voice_engine:
+            if voice_engine._mic_available:
+                asyncio.create_task(voice_engine.start_clap_detector())
+                log.info("✓ Clap detector started (single=ON, double=OFF)")
+            else:
+                asyncio.create_task(voice_engine.start_mic_retry_loop())
+                log.info("✓ Mic retry loop started")
     except Exception as e:
-        log.error(f"✗ Mic retry failed: {e}")
+        log.error(f"✗ Clap/mic setup failed: {e}")
 
     log.info("=" * 60)
     log.info("J.A.R.V.I.S BACKEND ONLINE")

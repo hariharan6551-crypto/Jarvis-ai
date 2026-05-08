@@ -21,6 +21,7 @@ function HomePage() {
   const aiState = useStore(s => s.aiState);
   const aiResponse = useStore(s => s.aiResponse);
   const connected = useStore(s => s.connected);
+  const jarvisActive = useStore(s => s.jarvisActive);
   return (
     <div className="content-grid">
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12, overflow: 'auto' }}>
@@ -43,7 +44,9 @@ function HomePage() {
             <span className="sys-alert-icon">✓</span>
             <div className="sys-alert-text">
               <div className="sys-alert-title">All systems {connected ? 'operational' : 'connecting...'}</div>
-              <div className="sys-alert-desc">{connected ? 'Running optimally' : 'Attempting backend connection'}</div>
+              <div className="sys-alert-desc">
+                {jarvisActive ? '🟢 JARVIS active — listening' : connected ? 'Running optimally' : 'Attempting backend connection'}
+              </div>
             </div>
           </div>
         </div>
@@ -52,12 +55,12 @@ function HomePage() {
   );
 }
 
-// Speaks welcome message using browser TTS (instant, no backend needed)
-function speakWelcome() {
+// ─── Speak using browser TTS ──────────────────────────────────────
+function speakBrowser(text) {
   const synth = window.speechSynthesis;
-  if (!synth) return;
+  if (!synth || !text) return;
   synth.cancel();
-  const msg = new SpeechSynthesisUtterance("Welcome back Hari. All systems are operational. How may I assist you today?");
+  const msg = new SpeechSynthesisUtterance(text);
   msg.rate = 1.0;
   msg.pitch = 0.9;
   msg.volume = 1.0;
@@ -68,13 +71,13 @@ function speakWelcome() {
   synth.speak(msg);
 }
 
-// Also try backend TTS (higher quality) if available
-async function speakWelcomeBackend() {
+// ─── Backend TTS with browser fallback ────────────────────────────
+async function speakBackend(text) {
   try {
     const res = await fetch('http://127.0.0.1:8765/api/tts', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: "Welcome back Hari. All systems are operational. How may I assist you today?" }),
+      body: JSON.stringify({ text }),
     });
     const data = await res.json();
     if (data.audio) {
@@ -84,76 +87,130 @@ async function speakWelcomeBackend() {
       const blob = new Blob([bytes], { type: 'audio/mp3' });
       const url = URL.createObjectURL(blob);
       const audio = new Audio(url);
-      audio.play().catch(() => speakWelcome());
+      audio.play().catch(() => speakBrowser(text));
       audio.onended = () => URL.revokeObjectURL(url);
       return;
     }
-  } catch (e) {}
-  speakWelcome();
+  } catch (e) { /* fallback */ }
+  speakBrowser(text);
 }
 
-// Auto-start voice recognition globally
-function autoStartVoice() {
+// ─── Voice Recognition (Web Speech API) ──────────────────────────
+// Handles wake word "JARVIS" detection from voice input.
+// Clap detection is handled by the BACKEND via sounddevice.
+function startVoiceRecognition() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR) return null;
+  if (!SR) {
+    console.warn('Web Speech API not supported in this browser');
+    return null;
+  }
 
   const rec = new SR();
   rec.continuous = true;
-  rec.interimResults = true;
+  rec.interimResults = false; // Only final results for reliability
   rec.lang = 'en-US';
+  rec.maxAlternatives = 3;
 
   rec.onstart = () => {
     useStore.getState().setRecording(true);
-    console.log('🎤 JARVIS voice active — say "Jarvis" followed by your command');
+    console.log('🎤 Voice recognition active — say "JARVIS" to activate');
   };
 
   rec.onresult = (event) => {
-    let finalT = '';
     for (let i = event.resultIndex; i < event.results.length; i++) {
-      if (event.results[i].isFinal) {
-        finalT += event.results[i][0].transcript;
-      }
-    }
+      if (!event.results[i].isFinal) continue;
 
-    if (finalT.trim()) {
-      const cmd = finalT.trim();
-      const lower = cmd.toLowerCase();
-      console.log('🗣️ Heard:', cmd);
+      // Check all alternatives for better wake word detection
+      for (let alt = 0; alt < event.results[i].length; alt++) {
+        const transcript = event.results[i][alt].transcript.trim();
+        const lower = transcript.toLowerCase();
 
-      // Check for deactivation commands
-      if (/^(turn off|go to sleep|jarvis stop|stop listening|deactivate|good\s*night)$/i.test(lower.replace(/hey\s+jarvis\s*/gi, '').trim())) {
-        useStore.getState().setAiState('idle');
-        showToast({ title: 'J.A.R.V.I.S', message: 'Going offline Hari. Call me anytime.', type: 'info' });
-        return;
-      }
+        if (!lower) continue;
+        console.log('🗣️ Heard:', transcript);
 
-      if (lower.includes('jarvis')) {
-        const cleaned = lower.replace(/hey\s+jarvis|jarvis/gi, '').replace(/^\s*[,.\s]+/, '').trim();
-        useStore.getState().setAiState('thinking');
-        if (cleaned) {
-          useStore.getState().setTranscription(cleaned);
-          useStore.getState().sendCommand(cleaned);
-        } else {
-          useStore.getState().sendCommand('hello');
+        // ━━━ WAKE WORD: "JARVIS" ━━━
+        // Check if any variant of "jarvis" is spoken
+        const hasWakeWord = /jarvis/i.test(lower);
+
+        if (hasWakeWord) {
+          const store = useStore.getState();
+
+          // Count how many times "jarvis" appears (urgent call)
+          const jarvisCount = (lower.match(/jarvis/gi) || []).length;
+
+          // Extract command after the wake word
+          const cleaned = lower
+            .replace(/hey\s+jarvis|jarvis/gi, '')
+            .replace(/^\s*[,.\s]+/, '')
+            .trim();
+
+          // Activate JARVIS
+          store.setJarvisActive(true);
+          store.setAiState('listening');
+
+          if (jarvisCount >= 2) {
+            // Multiple "JARVIS" calls = urgent
+            console.log('🚨 Urgent wake word ×' + jarvisCount);
+            showToast({ title: 'J.A.R.V.I.S', message: "Yes, I'm here. How can I help?", type: 'info' });
+            store.addChatMessage({ role: 'assistant', content: "Yes, I'm here. How can I help?" });
+            speakBackend("Yes, I'm here. How can I help?");
+          } else if (cleaned) {
+            // Wake word + command
+            showToast({ title: 'J.A.R.V.I.S', message: `Processing: "${cleaned}"`, type: 'info' });
+            store.sendCommand(cleaned);
+          } else {
+            // Just wake word, no command
+            showToast({ title: 'J.A.R.V.I.S', message: 'Hey Hari, how can I help you?', type: 'info' });
+            store.addChatMessage({ role: 'assistant', content: 'Hey Hari, how can I help you?' });
+            speakBackend('Hey Hari, how can I help you?');
+          }
+
+          // Found wake word in this alternative, stop checking others
+          break;
+        }
+
+        // ━━━ DEACTIVATION COMMANDS ━━━
+        if (/^(turn off|go to sleep|stop listening|deactivate|good\s*night|shut down)$/i.test(lower)) {
+          const store = useStore.getState();
+          store.setJarvisActive(false);
+          store.setAiState('idle');
+          showToast({ title: 'J.A.R.V.I.S', message: 'Going offline Hari. Call me anytime.', type: 'info' });
+          store.addChatMessage({ role: 'assistant', content: 'Going offline Hari. Call me anytime.' });
+          speakBackend('Going offline Hari. Call me anytime.');
+          break;
+        }
+
+        // If JARVIS is active and user speaks a command without wake word
+        if (useStore.getState().jarvisActive) {
+          const store = useStore.getState();
+          store.sendCommand(transcript);
+          break;
         }
       }
     }
   };
 
   rec.onerror = (event) => {
-    console.log('Voice error:', event.error);
+    if (event.error !== 'no-speech') {
+      console.warn('Voice error:', event.error);
+    }
   };
 
+  // Auto-restart on end to keep listening forever
   rec.onend = () => {
-    setTimeout(() => {
-      try { rec.start(); } catch (e) {
-        setTimeout(() => { try { rec.start(); } catch (e2) {} }, 1000);
-      }
-    }, 300);
+    useStore.getState().setRecording(false);
+    if (!rec._stopped) {
+      setTimeout(() => {
+        try { rec.start(); } catch (e) {
+          setTimeout(() => { try { rec.start(); } catch (e2) {} }, 1500);
+        }
+      }, 500);
+    }
   };
 
+  rec._stopped = false;
   try { rec.start(); } catch (e) {
-    setTimeout(() => { try { rec.start(); } catch (e2) {} }, 1000);
+    setTimeout(() => { try { rec.start(); } catch (e2) {} }, 1500);
   }
 
   return rec;
@@ -170,10 +227,10 @@ export default function App() {
 
   const onBootComplete = useCallback(() => {
     setShowBoot(false);
-    setTimeout(() => speakWelcomeBackend(), 500);
+    setTimeout(() => speakBackend("Welcome back Hari. All systems are operational. How may I assist you today?"), 500);
     setTimeout(() => {
       if (!voiceRef.current) {
-        voiceRef.current = autoStartVoice();
+        voiceRef.current = startVoiceRecognition();
       }
     }, 1500);
   }, [setShowBoot]);
@@ -196,7 +253,7 @@ export default function App() {
       clearTimeout(t);
       clearInterval(interval);
       if (voiceRef.current) {
-        try { voiceRef.current.onend = null; voiceRef.current.stop(); } catch (e) {}
+        try { voiceRef.current._stopped = true; voiceRef.current.onend = null; voiceRef.current.stop(); } catch (e) {}
       }
     };
   }, [connectWs, fetchStatus]);

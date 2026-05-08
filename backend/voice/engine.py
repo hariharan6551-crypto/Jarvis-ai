@@ -48,12 +48,18 @@ class VoiceEngine:
         self._is_listening = False
         self._shutdown = False
 
+        # JARVIS active state
+        self.jarvis_active = False
+
         # Callbacks
         self.on_clap: Optional[Callable] = None          # single clap
         self.on_double_clap: Optional[Callable] = None    # double clap
         self.on_triple_clap: Optional[Callable] = None    # triple clap
         self.on_wake_word: Optional[Callable] = None      # "Hey JARVIS"
         self.on_voice_activity: Optional[Callable] = None  # voice detected
+
+        # WebSocket broadcast function (set by main.py)
+        self.broadcast_fn: Optional[Callable] = None
 
         # Detect mic on init
         self._detect_mic()
@@ -111,10 +117,7 @@ class VoiceEngine:
                 if found:
                     log.info("Microphone detected on retry!")
                     # Start listeners that need mic
-                    if self.on_wake_word:
-                        asyncio.create_task(self.start_wake_word_listener())
-                    if self.on_clap:
-                        asyncio.create_task(self.start_clap_detector())
+                    asyncio.create_task(self.start_clap_detector())
                     break
             else:
                 break
@@ -379,40 +382,56 @@ class VoiceEngine:
     async def start_clap_detector(self):
         """
         Background clap detection using audio amplitude spikes.
-        Single clap → activate JARVIS
-        Double clap → toggle JARVIS ON/OFF
-        Triple clap → emergency stop
+        Single clap  → activate JARVIS (say "Hey Hari, how can I help you?")
+        Double clap  → deactivate JARVIS (turn off)
         """
         if not self._mic_available:
             log.warning("Clap detection unavailable — no microphone")
             return
 
-        log.info("Starting clap detector...")
-        self._clap_listener_task = asyncio.current_task()
+        log.info("🎤 Starting clap detector (single=ON, double=OFF)...")
 
         try:
             import sounddevice as sd
             import numpy as np
 
             sample_rate = 44100
-            block_size = 1024
-            clap_threshold = 0.5      # Amplitude threshold for a clap
-            clap_cooldown = 0.15      # Min time between claps (seconds)
-            multi_clap_window = 0.6   # Window to detect multiple claps
+            block_size = 2048
+            # Adaptive threshold - will be calibrated
+            clap_threshold = 0.35
+            clap_cooldown = 0.25       # Min time between claps (seconds)
+            multi_clap_window = 0.65   # Window to detect multiple claps
 
             clap_times = []
+            # Track ambient noise for adaptive threshold
+            noise_samples = []
+            noise_floor = 0.05
 
             def _audio_callback(indata, frames, time_info, status):
+                nonlocal noise_floor
                 if status:
                     return
                 try:
                     amplitude = np.abs(indata).max()
-                    if amplitude > clap_threshold:
+
+                    # Update noise floor (rolling average of quiet samples)
+                    if amplitude < 0.15:
+                        noise_samples.append(amplitude)
+                        if len(noise_samples) > 200:
+                            noise_samples.pop(0)
+                        if len(noise_samples) > 20:
+                            noise_floor = np.mean(noise_samples) * 1.5
+
+                    # Adaptive threshold: must be well above noise floor
+                    adaptive_thresh = max(clap_threshold, noise_floor * 4)
+
+                    if amplitude > adaptive_thresh:
                         now = time.time()
                         # Cooldown check
                         if clap_times and (now - clap_times[-1]) < clap_cooldown:
                             return
                         clap_times.append(now)
+                        log.debug(f"Clap spike detected: amplitude={amplitude:.3f} threshold={adaptive_thresh:.3f}")
                 except Exception:
                     pass
 
@@ -425,6 +444,7 @@ class VoiceEngine:
             )
 
             with stream:
+                log.info("✓ Clap detector active and listening")
                 while not self._shutdown:
                     await asyncio.sleep(0.1)
 
@@ -434,45 +454,47 @@ class VoiceEngine:
                     now = time.time()
                     # Check if multi-clap window has passed
                     if (now - clap_times[-1]) > multi_clap_window:
-                        # Count claps in the window
-                        recent = [t for t in clap_times if (now - t) < (multi_clap_window + 0.3)]
+                        recent = [t for t in clap_times if (now - t) < (multi_clap_window + 0.5)]
                         clap_count = len(recent)
                         clap_times.clear()
 
-                        if clap_count >= 3 and self.on_triple_clap:
-                            log.info("Triple clap detected → Emergency stop")
-                            try:
-                                if asyncio.iscoroutinefunction(self.on_triple_clap):
-                                    await self.on_triple_clap()
-                                else:
-                                    self.on_triple_clap()
-                            except Exception as e:
-                                log.error(f"Triple clap handler error: {e}")
-
-                        elif clap_count == 2 and self.on_double_clap:
-                            log.info("Double clap detected → Toggle JARVIS")
-                            try:
-                                if asyncio.iscoroutinefunction(self.on_double_clap):
-                                    await self.on_double_clap()
-                                else:
-                                    self.on_double_clap()
-                            except Exception as e:
-                                log.error(f"Double clap handler error: {e}")
-
-                        elif clap_count == 1 and self.on_clap:
-                            log.info("Single clap detected → Activate JARVIS")
-                            try:
-                                if asyncio.iscoroutinefunction(self.on_clap):
-                                    await self.on_clap()
-                                else:
-                                    self.on_clap()
-                            except Exception as e:
-                                log.error(f"Clap handler error: {e}")
+                        if clap_count >= 2:
+                            log.info("👏👏 Double clap → Deactivate JARVIS")
+                            self.jarvis_active = False
+                            await self._broadcast_clap_event("double_clap", "off")
+                        elif clap_count == 1:
+                            log.info("👏 Single clap → Activate JARVIS")
+                            self.jarvis_active = True
+                            await self._broadcast_clap_event("single_clap", "on")
 
         except ImportError:
             log.warning("sounddevice not available for clap detection")
         except Exception as e:
             log.error(f"Clap detector error: {e}")
+            # Auto-restart after 3 seconds
+            if not self._shutdown:
+                log.info("Restarting clap detector in 3s...")
+                await asyncio.sleep(3)
+                asyncio.create_task(self.start_clap_detector())
+
+    async def _broadcast_clap_event(self, event_type: str, jarvis_state: str):
+        """Broadcast clap event to all connected WebSocket clients."""
+        if self.broadcast_fn:
+            try:
+                await self.broadcast_fn({
+                    "type": "clap_event",
+                    "data": {
+                        "event": event_type,
+                        "jarvis_active": jarvis_state == "on",
+                        "message": (
+                            f"Hey {settings.USER_NAME}, how can I help you?"
+                            if jarvis_state == "on"
+                            else f"Going offline {settings.USER_NAME}. Call me anytime."
+                        ),
+                    },
+                })
+            except Exception as e:
+                log.error(f"Broadcast clap event failed: {e}")
 
     # ─── Wake Word Detection ──────────────────────────────────────────
 
@@ -544,6 +566,20 @@ class VoiceEngine:
                     text = result.get("text", "").lower().strip()
                     if text and any(w in text for w in wake_words):
                         log.info(f"Wake word detected: '{text}'")
+                        self.jarvis_active = True
+                        # Broadcast wake word event
+                        if self.broadcast_fn:
+                            try:
+                                await self.broadcast_fn({
+                                    "type": "wake_word",
+                                    "data": {
+                                        "text": text,
+                                        "jarvis_active": True,
+                                        "message": f"Hey {settings.USER_NAME}, how can I help you?",
+                                    },
+                                })
+                            except Exception as e:
+                                log.error(f"Broadcast wake word failed: {e}")
                         if self.on_wake_word:
                             try:
                                 if asyncio.iscoroutinefunction(self.on_wake_word):
@@ -660,7 +696,7 @@ class VoiceEngine:
 
     async def activation_greeting(self) -> Optional[bytes]:
         """Say activation greeting."""
-        text = f"Hello {settings.USER_NAME}, I'm listening. How can I help you?"
+        text = f"Hey {settings.USER_NAME}, how can I help you?"
         return await self.speak(text)
 
     async def deactivation_message(self) -> Optional[bytes]:
@@ -704,4 +740,5 @@ class VoiceEngine:
                 else True
             ),
             "wake_word": settings.WAKE_WORD,
+            "jarvis_active": self.jarvis_active,
         }

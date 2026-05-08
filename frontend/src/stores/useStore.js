@@ -13,6 +13,9 @@ const useStore = create((set, get) => ({
   showBoot: true,
   sidebarCollapsed: false,
 
+  // JARVIS active state (clap toggle)
+  jarvisActive: false,
+
   // Data
   messages: [],
   chatMessages: [],
@@ -49,6 +52,7 @@ const useStore = create((set, get) => ({
   setAudioLevel: (v) => set({ audioLevel: v }),
   setTranscription: (t) => set({ transcription: t }),
   setSystemInfo: (info) => set({ systemInfo: info }),
+  setJarvisActive: (v) => set({ jarvisActive: v }),
 
   toggleTheme: () => {
     const newTheme = get().theme === 'dark' ? 'light' : 'dark';
@@ -59,7 +63,7 @@ const useStore = create((set, get) => ({
   setWaveformData: (data) => set({ waveformData: data }),
 
   addChatMessage: (msg) => set((s) => ({
-    chatMessages: [...s.chatMessages, { ...msg, id: Date.now(), timestamp: new Date().toLocaleTimeString() }]
+    chatMessages: [...s.chatMessages, { ...msg, id: Date.now() + Math.random(), timestamp: new Date().toLocaleTimeString() }]
   })),
 
   addCommand: (cmd) => set((s) => ({
@@ -72,6 +76,41 @@ const useStore = create((set, get) => ({
   updateSettings: (key, val) => set((s) => ({
     settings: { ...s.settings, [key]: val }
   })),
+
+  // ─── Speak using browser TTS ───────────────────────────────────
+  speakBrowser: (text) => {
+    const synth = window.speechSynthesis;
+    if (!synth || !text) return;
+    synth.cancel();
+    const msg = new SpeechSynthesisUtterance(text);
+    msg.rate = 1.0;
+    msg.pitch = 0.9;
+    msg.volume = 1.0;
+    msg.lang = 'en-US';
+    const voices = synth.getVoices();
+    const preferred = voices.find(v =>
+      v.name.includes('Google US English') || v.name.includes('David') || v.name.includes('Male')
+    );
+    if (preferred) msg.voice = preferred;
+    synth.speak(msg);
+  },
+
+  // ─── Speak using backend TTS (higher quality), fallback to browser ─
+  speakBackend: async (text) => {
+    try {
+      const res = await fetch(`${get().apiUrl}/api/tts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      });
+      const data = await res.json();
+      if (data.audio) {
+        get().playAudio(data.audio);
+        return;
+      }
+    } catch (e) { /* fallback */ }
+    get().speakBrowser(text);
+  },
 
   // WebSocket
   connectWs: () => {
@@ -102,8 +141,10 @@ const useStore = create((set, get) => ({
 
   handleWsMessage: (data) => {
     const { type } = data;
+
     if (type === 'state_change') {
       set({ aiState: data.data.state });
+
     } else if (type === 'response') {
       const d = data.data;
       const responseText = d.response_text || d.message || '';
@@ -122,9 +163,39 @@ const useStore = create((set, get) => ({
       if (d.audio) {
         get().playAudio(d.audio);
       }
+
     } else if (type === 'transcription') {
       set({ transcription: data.data.text });
       get().addChatMessage({ role: 'user', content: data.data.text });
+
+    } else if (type === 'clap_event') {
+      // ━━━ CLAP DETECTION FROM BACKEND ━━━
+      const d = data.data;
+      const isActive = d.jarvis_active;
+      set({ jarvisActive: isActive });
+
+      if (isActive) {
+        // Single clap → JARVIS ON
+        console.log('👏 Single clap → JARVIS ACTIVATED');
+        set({ aiState: 'listening' });
+        get().addChatMessage({ role: 'assistant', content: d.message || 'Hey Hari, how can I help you?' });
+        get().speakBackend(d.message || 'Hey Hari, how can I help you?');
+      } else {
+        // Double clap → JARVIS OFF
+        console.log('👏👏 Double clap → JARVIS DEACTIVATED');
+        set({ aiState: 'idle' });
+        get().addChatMessage({ role: 'assistant', content: d.message || 'Going offline Hari. Call me anytime.' });
+        get().speakBackend(d.message || 'Going offline Hari. Call me anytime.');
+      }
+
+    } else if (type === 'wake_word') {
+      // ━━━ WAKE WORD FROM BACKEND (Vosk) ━━━
+      const d = data.data;
+      set({ jarvisActive: true, aiState: 'listening' });
+      console.log('🗣️ Wake word detected:', d.text);
+      get().addChatMessage({ role: 'assistant', content: d.message || 'Hey Hari, how can I help you?' });
+      get().speakBackend(d.message || 'Hey Hari, how can I help you?');
+
     } else if (type === 'status') {
       set({
         systemInfo: data.data,
