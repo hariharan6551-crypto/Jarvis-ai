@@ -20,11 +20,16 @@ const useStore = create((set, get) => ({
   systemInfo: null,
   aiResponse: '',
   transcription: '',
+  chromeProfiles: [],
+  frequentApps: [],
 
   // Audio
   isRecording: false,
   audioLevel: 0,
   waveformData: Array(32).fill(4),
+
+  // Theme
+  theme: localStorage.getItem('jarvis-theme') || 'dark',
 
   // Settings
   settings: {
@@ -45,6 +50,12 @@ const useStore = create((set, get) => ({
   setTranscription: (t) => set({ transcription: t }),
   setSystemInfo: (info) => set({ systemInfo: info }),
 
+  toggleTheme: () => {
+    const newTheme = get().theme === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', newTheme);
+    localStorage.setItem('jarvis-theme', newTheme);
+    set({ theme: newTheme });
+  },
   setWaveformData: (data) => set({ waveformData: data }),
 
   addChatMessage: (msg) => set((s) => ({
@@ -55,7 +66,7 @@ const useStore = create((set, get) => ({
     recentCommands: [
       { ...cmd, id: Date.now(), time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) },
       ...s.recentCommands
-    ].slice(0, 10)
+    ].slice(0, 15)
   })),
 
   updateSettings: (key, val) => set((s) => ({
@@ -105,9 +116,9 @@ const useStore = create((set, get) => ({
         text: d.intent || 'command',
         status: d.success ? 'success' : 'error',
         message: responseText,
+        steps: d.plan_steps || 1,
       });
 
-      // Play audio if available
       if (d.audio) {
         get().playAudio(d.audio);
       }
@@ -115,7 +126,13 @@ const useStore = create((set, get) => ({
       set({ transcription: data.data.text });
       get().addChatMessage({ role: 'user', content: data.data.text });
     } else if (type === 'status') {
-      set({ systemInfo: data.data });
+      set({
+        systemInfo: data.data,
+        chromeProfiles: data.data.chrome_profiles || [],
+        frequentApps: data.data.frequent_apps || [],
+      });
+    } else if (type === 'profiles') {
+      set({ chromeProfiles: data.data.profiles || [] });
     } else if (type === 'connected') {
       console.log('Server:', data.data.message);
     }
@@ -130,7 +147,6 @@ const useStore = create((set, get) => ({
     if (ws && connected) {
       ws.send(JSON.stringify({ type: 'command', text }));
     } else {
-      // Fallback to REST
       fetch(`${get().apiUrl}/api/command`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -154,8 +170,20 @@ const useStore = create((set, get) => ({
     try {
       const res = await fetch(`${get().apiUrl}/api/status`);
       const data = await res.json();
-      set({ systemInfo: data });
+      set({
+        systemInfo: data,
+        chromeProfiles: data.chrome_profiles || [],
+        frequentApps: data.frequent_apps || [],
+      });
     } catch (e) { /* backend not running */ }
+  },
+
+  fetchProfiles: async () => {
+    try {
+      const res = await fetch(`${get().apiUrl}/api/browser/profiles`);
+      const data = await res.json();
+      set({ chromeProfiles: data.profiles || [] });
+    } catch (e) { /* ignore */ }
   },
 
   playAudio: (base64Audio) => {

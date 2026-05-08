@@ -18,11 +18,25 @@ class Settings(BaseSettings):
 
     # Application
     APP_NAME: str = "J.A.R.V.I.S"
-    APP_VERSION: str = "1.0.0"
+    APP_VERSION: str = "2.0.0"
     DEBUG: bool = True
     HOST: str = "127.0.0.1"
     PORT: int = 8765
     LOG_LEVEL: str = "INFO"
+
+    # Browser Automation
+    CHROME_PROFILE_AUTO_DETECT: bool = True
+    PLAYWRIGHT_HEADLESS: bool = False
+    DEFAULT_BROWSER: str = "chrome"
+
+    # Vision & OCR
+    TESSERACT_PATH: Optional[str] = None
+    OCR_LANGUAGE: str = "eng"
+    VISION_CONFIDENCE_THRESHOLD: float = 60.0
+
+    # Task Planner
+    USE_AI_PLANNER: bool = True
+    MAX_PLAN_STEPS: int = 10
 
     # AI Providers
     OPENAI_API_KEY: Optional[str] = None

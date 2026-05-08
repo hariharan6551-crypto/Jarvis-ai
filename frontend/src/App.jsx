@@ -183,9 +183,16 @@ export default function App() {
   }, [setShowBoot]);
 
   useEffect(() => {
-    // Connect WebSocket and fetch status
-    const t = setTimeout(() => { connectWs(); fetchStatus(); }, 500);
-    const interval = setInterval(fetchStatus, 5000);
+    // Connect WebSocket and fetch status + profiles
+    const t = setTimeout(() => {
+      connectWs();
+      fetchStatus();
+      useStore.getState().fetchProfiles();
+      // Apply saved theme
+      const saved = localStorage.getItem('jarvis-theme') || 'dark';
+      document.documentElement.setAttribute('data-theme', saved);
+    }, 500);
+    const interval = setInterval(fetchStatus, 8000);
 
     // Load voices for browser TTS
     if (window.speechSynthesis) {
