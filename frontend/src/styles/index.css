@@ -146,6 +146,8 @@ body {
   content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px;
   background: linear-gradient(90deg, transparent, var(--cyan), transparent);
   opacity: 0.5;
+  pointer-events: none; /* FIX: Don't block clicks on panel content */
+  z-index: 0;
 }
 .panel-title {
   font-family: var(--font-display); font-size: 10px; letter-spacing: 2px;
@@ -241,6 +243,8 @@ body {
   width: 3px; border-radius: 2px; background: var(--cyan);
   transition: height 0.1s ease; min-height: 4px;
   box-shadow: 0 0 4px rgba(0,180,255,0.4);
+  will-change: transform, height; /* FIX: GPU-accelerated animation */
+  contain: layout style;
 }
 .waveform-bar.active { animation: waveform 0.5s ease infinite alternate; }
 
@@ -253,6 +257,8 @@ body {
   background: var(--bg-card); cursor: pointer;
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   gap: 4px; transition: all 0.3s; color: var(--text-secondary);
+  position: relative; z-index: 1; /* FIX: Ensure buttons are clickable */
+  pointer-events: all;
 }
 .quick-btn:hover {
   border-color: var(--cyan); background: var(--cyan-dim);
@@ -270,6 +276,8 @@ body {
   background: var(--bg-card); cursor: pointer; width: 100%;
   transition: all 0.3s ease; text-align: left;
   color: var(--text-primary);
+  position: relative; z-index: 1; /* FIX: Ensure profile buttons clickable */
+  pointer-events: all;
 }
 .profile-btn:hover {
   border-color: #4285f4; background: rgba(66,133,244,0.1);
@@ -415,7 +423,8 @@ body {
   position: fixed; inset: 0; z-index: 9999;
   background: var(--bg-primary); display: flex; flex-direction: column;
   align-items: center; justify-content: center;
-  animation: bootFadeOut 0.8s ease 4s forwards;
+  /* FIX: Removed CSS-only fadeout — React handles removal via state */
+  /* Boot screen is removed from DOM by BootSequence component */
 }
 .boot-logo {
   width: 120px; height: 120px; border-radius: 50%;
@@ -474,11 +483,10 @@ body {
 @keyframes rotate-ring { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 @keyframes pulse-dot { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
 @keyframes pulse-btn { 0%,100% { box-shadow: 0 0 0 0 rgba(239,68,68,0.4); } 50% { box-shadow: 0 0 0 8px rgba(239,68,68,0); } }
-@keyframes waveform { 0% { height: 4px; } 100% { height: 28px; } }
+@keyframes waveform { 0% { transform: scaleY(0.2); } 100% { transform: scaleY(1); } } /* FIX: Use transform for GPU */
 @keyframes fadeInUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes bootPulse { 0%,100% { box-shadow: 0 0 20px rgba(0,180,255,0.3); } 50% { box-shadow: 0 0 40px rgba(0,180,255,0.6); } }
 @keyframes bootProgress { from { width: 0; } to { width: 100%; } }
-@keyframes bootFadeOut { to { opacity: 0; pointer-events: none; } }
 @keyframes shimmer {
   0% { background-position: -200% center; }
   100% { background-position: 200% center; }

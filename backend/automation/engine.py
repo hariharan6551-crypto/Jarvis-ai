@@ -1,13 +1,14 @@
 """
 J.A.R.V.I.S Desktop Automation Engine
-Full Windows PC control: apps, files, system, media, browser, windows, advanced actions.
+Full Windows PC control: apps, system, media, volume, brightness, files.
+Every action logged with duration. No silent failures.
 """
 
 import asyncio
 import os
 import subprocess
 import time
-import json
+import base64
 from pathlib import Path
 from typing import Optional
 from core.logger import get_logger
@@ -17,486 +18,587 @@ log = get_logger("automation")
 
 
 class AutomationEngine:
-    """Full desktop automation controller for Windows."""
+    """Desktop automation via pyautogui, pygetwindow, subprocess, and Win32 API."""
 
     def __init__(self):
-        self._import_modules()
+        self.pyautogui = None
+        self.pygetwindow = None
+        self._init_libs()
         log.info("Automation engine initialized")
 
-    def _import_modules(self):
+    def _init_libs(self):
+        """Initialize automation libraries with proper error handling."""
         try:
             import pyautogui
             pyautogui.FAILSAFE = True
-            pyautogui.PAUSE = 0.1
+            pyautogui.PAUSE = 0.05
             self.pyautogui = pyautogui
+            log.debug("pyautogui loaded")
         except ImportError:
-            self.pyautogui = None
+            log.error("pyautogui not installed — desktop automation unavailable")
 
         try:
-            import psutil
-            self.psutil = psutil
+            import pygetwindow as gw
+            self.pygetwindow = gw
+            log.debug("pygetwindow loaded")
         except ImportError:
-            self.psutil = None
+            log.warning("pygetwindow not installed — window management limited")
+
+    def _check_pyautogui(self) -> dict:
+        """Check if pyautogui is available, return error dict if not."""
+        if self.pyautogui is None:
+            return {"success": False, "message": "pyautogui not available — please install it"}
+        return None
+
+    def _timed_action(self, action_name: str):
+        """Context manager for timing and logging actions."""
+        class Timer:
+            def __init__(self):
+                self.start = time.time()
+                self.name = action_name
+
+            def __enter__(self):
+                log.debug(f"Starting: {self.name}")
+                return self
+
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                elapsed = (time.time() - self.start) * 1000
+                if exc_type:
+                    log.error(f"FAILED: {self.name} ({elapsed:.0f}ms) — {exc_val}")
+                else:
+                    log.info(f"Completed: {self.name} ({elapsed:.0f}ms)")
+                return False
+        return Timer()
 
     # ─── Application Management ───────────────────────────────────────
 
-    async def open_application(self, app: str) -> dict:
-        log.info(f"Opening application: {app}")
+    APP_PATHS = {
+        "chrome": "chrome",
+        "firefox": "firefox",
+        "msedge": "msedge",
+        "code": "code",
+        "notepad": "notepad",
+        "calc": "calc",
+        "mspaint": "mspaint",
+        "explorer": "explorer",
+        "explorer_downloads": r"explorer shell:Downloads",
+        "explorer_documents": r"explorer shell:Documents",
+        "explorer_desktop": r"explorer shell:Desktop",
+        "cmd": "cmd",
+        "powershell": "powershell",
+        "wt": "wt",
+        "taskmgr": "taskmgr",
+        "ms-settings:": "ms-settings:",
+        "control": "control",
+        "snippingtool": "snippingtool",
+        "winword": "winword",
+        "excel": "excel",
+        "powerpnt": "powerpnt",
+        "outlook": "outlook",
+    }
 
-        special_folders = {
-            "explorer_downloads": os.path.expanduser("~\\Downloads"),
-            "explorer_documents": os.path.expanduser("~\\Documents"),
-            "explorer_desktop": os.path.expanduser("~\\Desktop"),
-            "explorer_pictures": os.path.expanduser("~\\Pictures"),
-            "explorer_videos": os.path.expanduser("~\\Videos"),
-            "explorer_music": os.path.expanduser("~\\Music"),
-        }
+    async def open_application(self, app_name: str) -> dict:
+        """Open an application by name."""
+        with self._timed_action(f"open_app({app_name})"):
+            try:
+                app_lower = app_name.lower().strip()
+                cmd = self.APP_PATHS.get(app_lower, app_lower)
 
-        try:
-            if app in special_folders:
-                os.startfile(special_folders[app])
-                return {"success": True, "message": f"Opened {app.replace('explorer_', '').title()} folder"}
+                if cmd.startswith("ms-settings"):
+                    subprocess.Popen(["start", cmd], shell=True)
+                elif cmd.startswith("explorer shell:"):
+                    subprocess.Popen(cmd, shell=True)
+                elif app_lower in ("chrome", "firefox", "msedge"):
+                    subprocess.Popen(["start", cmd], shell=True)
+                else:
+                    subprocess.Popen(["start", "", cmd], shell=True)
 
-            if app.startswith("ms-settings"):
-                os.startfile(app)
-                return {"success": True, "message": "Opened Windows Settings"}
+                return {"success": True, "message": f"Opened {app_name}"}
+            except FileNotFoundError:
+                log.error(f"Application not found: {app_name}")
+                return {"success": False, "message": f"Application '{app_name}' not found on this system"}
+            except Exception as e:
+                log.error(f"Failed to open {app_name}: {e}")
+                return {"success": False, "message": f"Failed to open {app_name}: {str(e)}"}
 
-            app_commands = {
-                "chrome": "start chrome",
-                "firefox": "start firefox",
-                "msedge": "start msedge",
-                "code": "code",
-                "notepad": "notepad",
-                "calc": "calc",
-                "mspaint": "mspaint",
-                "explorer": "explorer",
-                "cmd": "start cmd",
-                "wt": "wt",
-                "powershell": "start powershell",
-                "taskmgr": "taskmgr",
-                "snippingtool": "snippingtool",
-                "control": "control",
-                "spotify": "start spotify:",
-                "discord": "start discord:",
-                "slack": "start slack:",
-                "teams": "start msteams:",
-                "whatsapp": "start whatsapp:",
-                "telegram": "start telegram:",
-                "zoom": "start zoommtg:",
-            }
+    async def close_application(self, app_name: str) -> dict:
+        """Close an application by name."""
+        with self._timed_action(f"close_app({app_name})"):
+            try:
+                app_lower = app_name.lower().strip()
 
-            cmd = app_commands.get(app, f"start {app}")
-            await asyncio.to_thread(
-                subprocess.Popen, cmd, shell=True,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-            )
-            return {"success": True, "message": f"Opening {app.title()}"}
-        except Exception as e:
-            log.error(f"Failed to open {app}: {e}")
-            return {"success": False, "message": f"Failed to open {app}: {str(e)}"}
+                # Try using pygetwindow first
+                if self.pygetwindow:
+                    windows = self.pygetwindow.getWindowsWithTitle(app_name)
+                    if windows:
+                        for w in windows:
+                            try:
+                                w.close()
+                            except Exception:
+                                pass
+                        return {"success": True, "message": f"Closed {app_name}"}
 
-    async def close_application(self, app: str) -> dict:
-        log.info(f"Closing application: {app}")
-        process_map = {
-            "chrome": "chrome.exe", "firefox": "firefox.exe", "msedge": "msedge.exe",
-            "code": "Code.exe", "notepad": "notepad.exe", "spotify": "Spotify.exe",
-            "discord": "Discord.exe", "slack": "slack.exe", "teams": "Teams.exe",
-            "whatsapp": "WhatsApp.exe", "explorer": "explorer.exe",
-        }
-        process_name = process_map.get(app, f"{app}.exe")
-        try:
-            result = await asyncio.to_thread(
-                subprocess.run, f"taskkill /IM {process_name} /F",
-                shell=True, capture_output=True, text=True
-            )
-            if result.returncode == 0:
-                return {"success": True, "message": f"Closed {app}"}
-            return {"success": False, "message": f"Could not find {app} running"}
-        except Exception as e:
-            return {"success": False, "message": str(e)}
+                # Fallback to taskkill
+                process_name = self.APP_PATHS.get(app_lower, app_lower)
+                if not process_name.endswith(".exe"):
+                    process_name += ".exe"
 
-    # ─── Window Management ────────────────────────────────────────────
+                result = subprocess.run(
+                    ["taskkill", "/F", "/IM", process_name],
+                    capture_output=True, text=True, timeout=10
+                )
+                if result.returncode == 0:
+                    return {"success": True, "message": f"Closed {app_name}"}
+                else:
+                    return {"success": False, "message": f"Could not close {app_name}: {result.stderr.strip()}"}
 
-    async def switch_window(self, app_name: str) -> dict:
-        """Switch to a running application window."""
-        try:
-            import pygetwindow as gw
-            windows = gw.getWindowsWithTitle(app_name)
-            if windows:
-                win = windows[0]
-                if win.isMinimized:
-                    win.restore()
-                win.activate()
-                return {"success": True, "message": f"Switched to {app_name}"}
-            return {"success": False, "message": f"No window found for {app_name}"}
-        except Exception as e:
-            return {"success": False, "message": str(e)}
+            except subprocess.TimeoutExpired:
+                return {"success": False, "message": f"Timeout closing {app_name}"}
+            except Exception as e:
+                log.error(f"Failed to close {app_name}: {e}")
+                return {"success": False, "message": f"Failed to close {app_name}: {str(e)}"}
 
-    async def minimize_window(self) -> dict:
-        if self.pyautogui:
-            self.pyautogui.hotkey('win', 'down')
-        return {"success": True, "message": "Window minimized"}
-
-    async def maximize_window(self) -> dict:
-        if self.pyautogui:
-            self.pyautogui.hotkey('win', 'up')
-        return {"success": True, "message": "Window maximized"}
-
-    async def close_window(self) -> dict:
-        if self.pyautogui:
-            self.pyautogui.hotkey('alt', 'F4')
-        return {"success": True, "message": "Window closed"}
-
-    async def switch_tab(self) -> dict:
-        if self.pyautogui:
-            self.pyautogui.hotkey('alt', 'tab')
-        return {"success": True, "message": "Switched tab"}
-
-    async def new_tab(self) -> dict:
-        if self.pyautogui:
-            self.pyautogui.hotkey('ctrl', 't')
-        return {"success": True, "message": "New tab opened"}
-
-    async def close_tab(self) -> dict:
-        if self.pyautogui:
-            self.pyautogui.hotkey('ctrl', 'w')
-        return {"success": True, "message": "Tab closed"}
-
-    # ─── Browser Navigation ──────────────────────────────────────────
+    # ─── URL & Search ─────────────────────────────────────────────────
 
     async def go_to_url(self, url: str) -> dict:
-        """Navigate to a URL in the current browser."""
-        if self.pyautogui:
-            self.pyautogui.hotkey('ctrl', 'l')
-            await asyncio.sleep(0.3)
-            self.pyautogui.typewrite(url, interval=0.02)
-            self.pyautogui.press('enter')
-        return {"success": True, "message": f"Navigating to {url}"}
-
-    async def go_back(self) -> dict:
-        if self.pyautogui:
-            self.pyautogui.hotkey('alt', 'left')
-        return {"success": True, "message": "Going back"}
-
-    async def go_forward(self) -> dict:
-        if self.pyautogui:
-            self.pyautogui.hotkey('alt', 'right')
-        return {"success": True, "message": "Going forward"}
-
-    async def refresh_page(self) -> dict:
-        if self.pyautogui:
-            self.pyautogui.press('f5')
-        return {"success": True, "message": "Page refreshed"}
-
-    async def scroll_down(self) -> dict:
-        if self.pyautogui:
-            self.pyautogui.scroll(-5)
-        return {"success": True, "message": "Scrolled down"}
-
-    async def scroll_up(self) -> dict:
-        if self.pyautogui:
-            self.pyautogui.scroll(5)
-        return {"success": True, "message": "Scrolled up"}
-
-    # ─── Web Search ───────────────────────────────────────────────────
+        """Navigate to a URL in the default browser."""
+        with self._timed_action(f"go_to_url({url})"):
+            try:
+                import webbrowser
+                if not url.startswith(("http://", "https://")):
+                    url = "https://" + url
+                webbrowser.open(url)
+                return {"success": True, "message": f"Navigated to {url}"}
+            except Exception as e:
+                return {"success": False, "message": f"Failed to open URL: {str(e)}"}
 
     async def search_web(self, query: str) -> dict:
-        import urllib.parse
-        url = f"https://www.google.com/search?q={urllib.parse.quote(query)}"
-        try:
-            os.startfile(url)
-            return {"success": True, "message": f"Searching Google for: {query}"}
-        except Exception as e:
-            return {"success": False, "message": str(e)}
+        """Search Google in the default browser."""
+        with self._timed_action(f"search_web({query})"):
+            try:
+                import webbrowser
+                import urllib.parse
+                url = f"https://www.google.com/search?q={urllib.parse.quote(query)}"
+                webbrowser.open(url)
+                return {"success": True, "message": f"Searching Google for: {query}"}
+            except Exception as e:
+                return {"success": False, "message": f"Search failed: {str(e)}"}
 
     async def search_youtube(self, query: str) -> dict:
-        import urllib.parse
-        url = f"https://www.youtube.com/results?search_query={urllib.parse.quote(query)}"
-        try:
-            os.startfile(url)
-            return {"success": True, "message": f"Searching YouTube for: {query}"}
-        except Exception as e:
-            return {"success": False, "message": str(e)}
-
-    async def open_website(self, site: str) -> dict:
-        """Open a website by name."""
-        sites = {
-            "google": "https://www.google.com",
-            "youtube": "https://www.youtube.com",
-            "gmail": "https://mail.google.com",
-            "github": "https://github.com",
-            "chatgpt": "https://chat.openai.com",
-            "whatsapp web": "https://web.whatsapp.com",
-            "twitter": "https://twitter.com",
-            "instagram": "https://instagram.com",
-            "facebook": "https://facebook.com",
-            "linkedin": "https://linkedin.com",
-            "reddit": "https://reddit.com",
-            "netflix": "https://netflix.com",
-            "amazon": "https://amazon.in",
-        }
-        url = sites.get(site.lower(), f"https://{site}")
-        os.startfile(url)
-        return {"success": True, "message": f"Opening {site}"}
+        """Search YouTube in the default browser."""
+        with self._timed_action(f"search_youtube({query})"):
+            try:
+                import webbrowser
+                import urllib.parse
+                url = f"https://www.youtube.com/results?search_query={urllib.parse.quote(query)}"
+                webbrowser.open(url)
+                return {"success": True, "message": f"Searching YouTube for: {query}"}
+            except Exception as e:
+                return {"success": False, "message": f"YouTube search failed: {str(e)}"}
 
     # ─── Volume Control ───────────────────────────────────────────────
 
-    async def volume_up(self, amount: int = 10) -> dict:
-        if self.pyautogui:
-            for _ in range(amount // 2):
+    async def volume_up(self) -> dict:
+        """Increase volume by one step."""
+        err = self._check_pyautogui()
+        if err:
+            return err
+        with self._timed_action("volume_up"):
+            try:
                 self.pyautogui.press("volumeup")
-        return {"success": True, "message": f"Volume increased"}
+                self.pyautogui.press("volumeup")
+                return {"success": True, "message": "Volume increased"}
+            except Exception as e:
+                return {"success": False, "message": f"Volume up failed: {str(e)}"}
 
-    async def volume_down(self, amount: int = 10) -> dict:
-        if self.pyautogui:
-            for _ in range(amount // 2):
+    async def volume_down(self) -> dict:
+        """Decrease volume by one step."""
+        err = self._check_pyautogui()
+        if err:
+            return err
+        with self._timed_action("volume_down"):
+            try:
                 self.pyautogui.press("volumedown")
-        return {"success": True, "message": f"Volume decreased"}
+                self.pyautogui.press("volumedown")
+                return {"success": True, "message": "Volume decreased"}
+            except Exception as e:
+                return {"success": False, "message": f"Volume down failed: {str(e)}"}
 
     async def volume_mute(self) -> dict:
-        if self.pyautogui:
-            self.pyautogui.press("volumemute")
-        return {"success": True, "message": "Volume toggled"}
+        """Toggle mute."""
+        err = self._check_pyautogui()
+        if err:
+            return err
+        with self._timed_action("volume_mute"):
+            try:
+                self.pyautogui.press("volumemute")
+                return {"success": True, "message": "Volume mute toggled"}
+            except Exception as e:
+                return {"success": False, "message": f"Mute toggle failed: {str(e)}"}
+
+    async def set_volume(self, level: int) -> dict:
+        """Set volume to a specific level (0-100)."""
+        with self._timed_action(f"set_volume({level})"):
+            try:
+                from ctypes import cast, POINTER
+                from comtypes import CLSCTX_ALL
+                from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+                devices = AudioUtilities.GetSpeakers()
+                interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+                volume = cast(interface, POINTER(IAudioEndpointVolume))
+                volume.SetMasterVolumeLevelScalar(level / 100.0, None)
+                return {"success": True, "message": f"Volume set to {level}%"}
+            except ImportError:
+                # Fallback: use nircmd or key presses
+                return {"success": False, "message": "pycaw not installed for precise volume control"}
+            except Exception as e:
+                return {"success": False, "message": f"Set volume failed: {str(e)}"}
 
     # ─── Brightness Control ───────────────────────────────────────────
 
-    async def brightness_up(self, amount: int = 20) -> dict:
-        try:
-            import screen_brightness_control as sbc
-            current = sbc.get_brightness()[0]
-            sbc.set_brightness(min(100, current + amount))
-            return {"success": True, "message": f"Brightness increased"}
-        except:
-            return {"success": False, "message": "Brightness control not available"}
+    async def brightness_up(self) -> dict:
+        """Increase brightness."""
+        with self._timed_action("brightness_up"):
+            try:
+                import screen_brightness_control as sbc
+                current = sbc.get_brightness(display=0)
+                if isinstance(current, list):
+                    current = current[0]
+                new_val = min(100, current + 10)
+                sbc.set_brightness(new_val, display=0)
+                return {"success": True, "message": f"Brightness increased to {new_val}%"}
+            except ImportError:
+                return {"success": False, "message": "screen_brightness_control not installed"}
+            except Exception as e:
+                return {"success": False, "message": f"Brightness up failed: {str(e)}"}
 
-    async def brightness_down(self, amount: int = 20) -> dict:
-        try:
-            import screen_brightness_control as sbc
-            current = sbc.get_brightness()[0]
-            sbc.set_brightness(max(0, current - amount))
-            return {"success": True, "message": f"Brightness decreased"}
-        except:
-            return {"success": False, "message": "Brightness control not available"}
-
-    # ─── Screenshot ───────────────────────────────────────────────────
-
-    async def take_screenshot(self) -> dict:
-        try:
-            if self.pyautogui:
-                d = Path.home() / "Pictures" / "JARVIS_Screenshots"
-                d.mkdir(parents=True, exist_ok=True)
-                f = d / f"screenshot_{int(time.time())}.png"
-                self.pyautogui.screenshot().save(str(f))
-                return {"success": True, "message": f"Screenshot saved", "path": str(f)}
-        except Exception as e:
-            return {"success": False, "message": str(e)}
-
-    # ─── System Commands ──────────────────────────────────────────────
-
-    async def shutdown_pc(self, confirm: bool = True) -> dict:
-        if confirm:
-            return {"success": True, "message": "Say 'confirm shutdown' to proceed", "requires_confirmation": True}
-        os.system("shutdown /s /t 5")
-        return {"success": True, "message": "Shutting down in 5 seconds"}
-
-    async def restart_pc(self, confirm: bool = True) -> dict:
-        if confirm:
-            return {"success": True, "message": "Say 'confirm restart' to proceed", "requires_confirmation": True}
-        os.system("shutdown /r /t 5")
-        return {"success": True, "message": "Restarting in 5 seconds"}
-
-    async def lock_pc(self) -> dict:
-        import ctypes
-        ctypes.windll.user32.LockWorkStation()
-        return {"success": True, "message": "PC locked"}
-
-    async def sleep_pc(self) -> dict:
-        os.system("rundll32.exe powrprof.dll,SetSuspendState 0,1,0")
-        return {"success": True, "message": "Going to sleep"}
+    async def brightness_down(self) -> dict:
+        """Decrease brightness."""
+        with self._timed_action("brightness_down"):
+            try:
+                import screen_brightness_control as sbc
+                current = sbc.get_brightness(display=0)
+                if isinstance(current, list):
+                    current = current[0]
+                new_val = max(0, current - 10)
+                sbc.set_brightness(new_val, display=0)
+                return {"success": True, "message": f"Brightness decreased to {new_val}%"}
+            except ImportError:
+                return {"success": False, "message": "screen_brightness_control not installed"}
+            except Exception as e:
+                return {"success": False, "message": f"Brightness down failed: {str(e)}"}
 
     # ─── Media Controls ───────────────────────────────────────────────
 
     async def media_play_pause(self) -> dict:
-        if self.pyautogui: self.pyautogui.press("playpause")
-        return {"success": True, "message": "Play/Pause toggled"}
+        err = self._check_pyautogui()
+        if err:
+            return err
+        with self._timed_action("media_play_pause"):
+            try:
+                self.pyautogui.press("playpause")
+                return {"success": True, "message": "Play/Pause toggled"}
+            except Exception as e:
+                return {"success": False, "message": f"Media play/pause failed: {str(e)}"}
 
     async def media_next(self) -> dict:
-        if self.pyautogui: self.pyautogui.press("nexttrack")
-        return {"success": True, "message": "Next track"}
+        err = self._check_pyautogui()
+        if err:
+            return err
+        with self._timed_action("media_next"):
+            try:
+                self.pyautogui.press("nexttrack")
+                return {"success": True, "message": "Skipped to next track"}
+            except Exception as e:
+                return {"success": False, "message": f"Media next failed: {str(e)}"}
 
     async def media_prev(self) -> dict:
-        if self.pyautogui: self.pyautogui.press("prevtrack")
-        return {"success": True, "message": "Previous track"}
+        err = self._check_pyautogui()
+        if err:
+            return err
+        with self._timed_action("media_prev"):
+            try:
+                self.pyautogui.press("prevtrack")
+                return {"success": True, "message": "Skipped to previous track"}
+            except Exception as e:
+                return {"success": False, "message": f"Media prev failed: {str(e)}"}
 
-    # ─── Keyboard Actions ─────────────────────────────────────────────
+    # ─── Keyboard & Text ──────────────────────────────────────────────
 
     async def type_text(self, text: str) -> dict:
-        if self.pyautogui:
-            await asyncio.sleep(0.5)
-            self.pyautogui.typewrite(text, interval=0.02)
-        return {"success": True, "message": f"Typed: {text}"}
+        """Type text at the current cursor position."""
+        err = self._check_pyautogui()
+        if err:
+            return err
+        with self._timed_action(f"type_text({text[:30]}...)"):
+            try:
+                self.pyautogui.typewrite(text, interval=0.02) if text.isascii() else self.pyautogui.write(text)
+                return {"success": True, "message": f"Typed: {text[:50]}"}
+            except Exception as e:
+                return {"success": False, "message": f"Type text failed: {str(e)}"}
 
-    async def press_key(self, key: str) -> dict:
-        """Press a keyboard key or shortcut."""
-        if self.pyautogui:
-            keys = key.lower().replace('+', ' ').split()
-            if len(keys) > 1:
-                self.pyautogui.hotkey(*keys)
-            else:
-                self.pyautogui.press(keys[0])
-        return {"success": True, "message": f"Pressed {key}"}
+    async def press_key(self, key_combo: str) -> dict:
+        """Press a keyboard shortcut (e.g., 'ctrl+c', 'alt+tab', 'enter')."""
+        err = self._check_pyautogui()
+        if err:
+            return err
+        with self._timed_action(f"press_key({key_combo})"):
+            try:
+                keys = [k.strip() for k in key_combo.lower().replace("+", " ").split()]
+                if len(keys) > 1:
+                    self.pyautogui.hotkey(*keys)
+                else:
+                    self.pyautogui.press(keys[0])
+                return {"success": True, "message": f"Pressed: {key_combo}"}
+            except Exception as e:
+                return {"success": False, "message": f"Press key failed: {str(e)}"}
 
-    async def copy(self) -> dict:
-        if self.pyautogui: self.pyautogui.hotkey('ctrl', 'c')
-        return {"success": True, "message": "Copied"}
+    # ─── Screenshot ───────────────────────────────────────────────────
 
-    async def paste(self) -> dict:
-        if self.pyautogui: self.pyautogui.hotkey('ctrl', 'v')
-        return {"success": True, "message": "Pasted"}
+    async def take_screenshot(self, filename: str = None) -> dict:
+        """Take a screenshot and return as base64."""
+        err = self._check_pyautogui()
+        if err:
+            return err
+        with self._timed_action("screenshot"):
+            try:
+                import io
+                screenshot = self.pyautogui.screenshot()
 
-    async def undo(self) -> dict:
-        if self.pyautogui: self.pyautogui.hotkey('ctrl', 'z')
-        return {"success": True, "message": "Undone"}
+                if filename:
+                    screenshots_dir = Path(settings.SQLITE_DB_PATH).parent / "screenshots"
+                    screenshots_dir.mkdir(exist_ok=True)
+                    filepath = screenshots_dir / filename
+                    screenshot.save(str(filepath))
 
-    async def select_all(self) -> dict:
-        if self.pyautogui: self.pyautogui.hotkey('ctrl', 'a')
-        return {"success": True, "message": "Selected all"}
+                buffer = io.BytesIO()
+                screenshot.save(buffer, format="PNG")
+                img_base64 = base64.b64encode(buffer.getvalue()).decode()
 
-    async def save(self) -> dict:
-        if self.pyautogui: self.pyautogui.hotkey('ctrl', 's')
-        return {"success": True, "message": "Saved"}
+                return {
+                    "success": True,
+                    "message": "Screenshot captured",
+                    "image": img_base64,
+                    "filename": filename,
+                }
+            except Exception as e:
+                return {"success": False, "message": f"Screenshot failed: {str(e)}"}
 
-    async def find(self, text: str = None) -> dict:
-        if self.pyautogui:
-            self.pyautogui.hotkey('ctrl', 'f')
-            if text:
-                await asyncio.sleep(0.3)
-                self.pyautogui.typewrite(text, interval=0.02)
-        return {"success": True, "message": f"Find opened{' for: ' + text if text else ''}"}
+    # ─── System Control ───────────────────────────────────────────────
 
-    # ─── Mouse Actions ────────────────────────────────────────────────
+    async def get_system_info(self) -> dict:
+        """Get comprehensive system information."""
+        with self._timed_action("get_system_info"):
+            try:
+                import psutil
 
-    async def click(self, x: int = None, y: int = None) -> dict:
-        if self.pyautogui:
-            if x and y:
-                self.pyautogui.click(x, y)
-            else:
-                self.pyautogui.click()
-        return {"success": True, "message": "Clicked"}
+                cpu_freq = psutil.cpu_freq()
+                mem = psutil.virtual_memory()
+                disk = psutil.disk_usage("C:\\")
+                net = psutil.net_io_counters()
 
-    async def right_click(self) -> dict:
-        if self.pyautogui:
-            self.pyautogui.rightClick()
-        return {"success": True, "message": "Right clicked"}
+                battery = None
+                try:
+                    bat = psutil.sensors_battery()
+                    if bat:
+                        battery = {
+                            "percent": bat.percent,
+                            "plugged_in": bat.power_plugged,
+                            "time_left": str(bat.secsleft // 60) + " min" if bat.secsleft > 0 else "N/A",
+                        }
+                except Exception:
+                    pass
 
-    async def double_click(self) -> dict:
-        if self.pyautogui:
-            self.pyautogui.doubleClick()
-        return {"success": True, "message": "Double clicked"}
+                # Top processes
+                procs = []
+                try:
+                    for p in psutil.process_iter(["name", "cpu_percent"]):
+                        try:
+                            info = p.info
+                            if info["cpu_percent"] and info["cpu_percent"] > 0:
+                                procs.append({"name": info["name"], "cpu_percent": info["cpu_percent"]})
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            continue
+                    procs = sorted(procs, key=lambda x: x["cpu_percent"], reverse=True)[:5]
+                except Exception:
+                    pass
+
+                data = {
+                    "cpu": {
+                        "usage_percent": psutil.cpu_percent(interval=0.5),
+                        "cores": psutil.cpu_count(),
+                        "frequency_mhz": round(cpu_freq.current) if cpu_freq else 0,
+                    },
+                    "memory": {
+                        "total_gb": round(mem.total / (1024**3), 1),
+                        "used_gb": round(mem.used / (1024**3), 1),
+                        "usage_percent": mem.percent,
+                    },
+                    "disk": {
+                        "total_gb": round(disk.total / (1024**3), 1),
+                        "used_gb": round(disk.used / (1024**3), 1),
+                        "free_gb": round(disk.free / (1024**3), 1),
+                        "usage_percent": round(disk.percent, 1),
+                    },
+                    "battery": battery or {"percent": None, "plugged_in": False},
+                    "network": {
+                        "bytes_sent_mb": round(net.bytes_sent / (1024**2), 1),
+                        "bytes_recv_mb": round(net.bytes_recv / (1024**2), 1),
+                    },
+                    "top_processes": procs,
+                }
+                return {"success": True, "data": data, "message": "System info retrieved"}
+            except ImportError:
+                return {"success": False, "message": "psutil not installed"}
+            except Exception as e:
+                return {"success": False, "message": f"System info failed: {str(e)}"}
+
+    async def shutdown_pc(self) -> dict:
+        """Shutdown the PC (with 30s delay for safety)."""
+        with self._timed_action("shutdown_pc"):
+            try:
+                subprocess.Popen(["shutdown", "/s", "/t", "30"])
+                return {"success": True, "message": "Shutting down in 30 seconds. Say 'cancel shutdown' to abort."}
+            except Exception as e:
+                return {"success": False, "message": f"Shutdown failed: {str(e)}"}
+
+    async def restart_pc(self) -> dict:
+        """Restart the PC (with 30s delay for safety)."""
+        with self._timed_action("restart_pc"):
+            try:
+                subprocess.Popen(["shutdown", "/r", "/t", "30"])
+                return {"success": True, "message": "Restarting in 30 seconds. Say 'cancel restart' to abort."}
+            except Exception as e:
+                return {"success": False, "message": f"Restart failed: {str(e)}"}
+
+    async def lock_pc(self) -> dict:
+        """Lock the PC."""
+        with self._timed_action("lock_pc"):
+            try:
+                import ctypes
+                ctypes.windll.user32.LockWorkStation()
+                return {"success": True, "message": "PC locked"}
+            except Exception as e:
+                return {"success": False, "message": f"Lock failed: {str(e)}"}
+
+    async def sleep_pc(self) -> dict:
+        """Put PC to sleep."""
+        with self._timed_action("sleep_pc"):
+            try:
+                subprocess.Popen(["rundll32.exe", "powrprof.dll,SetSuspendState", "0", "1", "0"])
+                return {"success": True, "message": "PC going to sleep"}
+            except Exception as e:
+                return {"success": False, "message": f"Sleep failed: {str(e)}"}
+
+    # ─── Window Management ────────────────────────────────────────────
+
+    async def switch_window(self, title: str) -> dict:
+        """Switch to a window by title."""
+        with self._timed_action(f"switch_window({title})"):
+            try:
+                if not self.pygetwindow:
+                    return {"success": False, "message": "pygetwindow not available"}
+
+                windows = self.pygetwindow.getWindowsWithTitle(title)
+                if windows:
+                    win = windows[0]
+                    if win.isMinimized:
+                        win.restore()
+                    win.activate()
+                    return {"success": True, "message": f"Switched to: {win.title}"}
+                return {"success": False, "message": f"Window '{title}' not found"}
+            except Exception as e:
+                return {"success": False, "message": f"Switch window failed: {str(e)}"}
+
+    async def maximize_window(self) -> dict:
+        """Maximize the current window."""
+        err = self._check_pyautogui()
+        if err:
+            return err
+        with self._timed_action("maximize_window"):
+            try:
+                if self.pygetwindow:
+                    win = self.pygetwindow.getActiveWindow()
+                    if win:
+                        win.maximize()
+                        return {"success": True, "message": "Window maximized"}
+                # Fallback
+                self.pyautogui.hotkey("win", "up")
+                return {"success": True, "message": "Window maximized"}
+            except Exception as e:
+                return {"success": False, "message": f"Maximize failed: {str(e)}"}
+
+    async def minimize_window(self) -> dict:
+        """Minimize the current window."""
+        err = self._check_pyautogui()
+        if err:
+            return err
+        with self._timed_action("minimize_window"):
+            try:
+                if self.pygetwindow:
+                    win = self.pygetwindow.getActiveWindow()
+                    if win:
+                        win.minimize()
+                        return {"success": True, "message": "Window minimized"}
+                self.pyautogui.hotkey("win", "down")
+                return {"success": True, "message": "Window minimized"}
+            except Exception as e:
+                return {"success": False, "message": f"Minimize failed: {str(e)}"}
 
     # ─── File Operations ──────────────────────────────────────────────
 
     async def open_file(self, path: str) -> dict:
-        """Open a file with its default application."""
-        try:
-            full_path = os.path.expanduser(path)
-            if os.path.exists(full_path):
-                os.startfile(full_path)
-                return {"success": True, "message": f"Opened {os.path.basename(full_path)}"}
-            return {"success": False, "message": f"File not found: {path}"}
-        except Exception as e:
-            return {"success": False, "message": str(e)}
-
-    async def create_folder(self, name: str) -> dict:
-        """Create a folder on the Desktop."""
-        try:
-            path = Path.home() / "Desktop" / name
-            path.mkdir(parents=True, exist_ok=True)
-            return {"success": True, "message": f"Created folder: {name}"}
-        except Exception as e:
-            return {"success": False, "message": str(e)}
-
-    # ─── Windows Shortcuts ────────────────────────────────────────────
-
-    async def show_desktop(self) -> dict:
-        if self.pyautogui: self.pyautogui.hotkey('win', 'd')
-        return {"success": True, "message": "Desktop shown"}
-
-    async def open_task_view(self) -> dict:
-        if self.pyautogui: self.pyautogui.hotkey('win', 'tab')
-        return {"success": True, "message": "Task view opened"}
-
-    async def open_action_center(self) -> dict:
-        if self.pyautogui: self.pyautogui.hotkey('win', 'a')
-        return {"success": True, "message": "Action center opened"}
-
-    async def open_start_menu(self) -> dict:
-        if self.pyautogui: self.pyautogui.press('win')
-        return {"success": True, "message": "Start menu opened"}
-
-    async def open_run(self) -> dict:
-        if self.pyautogui: self.pyautogui.hotkey('win', 'r')
-        return {"success": True, "message": "Run dialog opened"}
-
-    async def open_emoji(self) -> dict:
-        if self.pyautogui: self.pyautogui.hotkey('win', '.')
-        return {"success": True, "message": "Emoji picker opened"}
-
-    async def snap_left(self) -> dict:
-        if self.pyautogui: self.pyautogui.hotkey('win', 'left')
-        return {"success": True, "message": "Window snapped left"}
-
-    async def snap_right(self) -> dict:
-        if self.pyautogui: self.pyautogui.hotkey('win', 'right')
-        return {"success": True, "message": "Window snapped right"}
-
-    # ─── System Information ───────────────────────────────────────────
-
-    async def get_system_info(self) -> dict:
-        info = {}
-        if self.psutil:
+        """Open a file or folder."""
+        with self._timed_action(f"open_file({path})"):
             try:
-                info["cpu"] = {
-                    "usage_percent": self.psutil.cpu_percent(interval=0.5),
-                    "cores_physical": self.psutil.cpu_count(logical=False),
-                    "cores_logical": self.psutil.cpu_count(logical=True),
-                    "frequency_mhz": round(self.psutil.cpu_freq().current) if self.psutil.cpu_freq() else 0,
-                }
-                mem = self.psutil.virtual_memory()
-                info["memory"] = {
-                    "total_gb": round(mem.total / (1024**3), 2),
-                    "used_gb": round(mem.used / (1024**3), 2),
-                    "available_gb": round(mem.available / (1024**3), 2),
-                    "usage_percent": mem.percent,
-                }
-                disk = self.psutil.disk_usage("/")
-                info["disk"] = {
-                    "total_gb": round(disk.total / (1024**3), 2),
-                    "used_gb": round(disk.used / (1024**3), 2),
-                    "free_gb": round(disk.free / (1024**3), 2),
-                    "usage_percent": round(disk.percent, 1),
-                }
-                battery = self.psutil.sensors_battery()
-                if battery:
-                    info["battery"] = {
-                        "percent": battery.percent,
-                        "plugged_in": battery.power_plugged,
-                    }
-                net = self.psutil.net_io_counters()
-                info["network"] = {
-                    "bytes_sent_mb": round(net.bytes_sent / (1024**2), 2),
-                    "bytes_recv_mb": round(net.bytes_recv / (1024**2), 2),
-                }
-                processes = []
-                for proc in self.psutil.process_iter(["pid", "name", "cpu_percent", "memory_percent"]):
-                    try:
-                        pinfo = proc.info
-                        if pinfo["cpu_percent"] and pinfo["cpu_percent"] > 0:
-                            processes.append(pinfo)
-                    except:
-                        pass
-                processes.sort(key=lambda x: x.get("cpu_percent", 0), reverse=True)
-                info["top_processes"] = processes[:5]
+                os.startfile(path)
+                return {"success": True, "message": f"Opened: {path}"}
+            except FileNotFoundError:
+                return {"success": False, "message": f"File not found: {path}"}
             except Exception as e:
-                log.error(f"System info error: {e}")
-        return {"success": True, "data": info}
+                return {"success": False, "message": f"Open file failed: {str(e)}"}
+
+    async def create_folder(self, path: str) -> dict:
+        """Create a new folder."""
+        with self._timed_action(f"create_folder({path})"):
+            try:
+                Path(path).mkdir(parents=True, exist_ok=True)
+                return {"success": True, "message": f"Created folder: {path}"}
+            except Exception as e:
+                return {"success": False, "message": f"Create folder failed: {str(e)}"}
+
+    # ─── Clipboard ────────────────────────────────────────────────────
+
+    async def read_clipboard(self) -> dict:
+        """Read text from the clipboard."""
+        with self._timed_action("read_clipboard"):
+            try:
+                import win32clipboard
+                win32clipboard.OpenClipboard()
+                try:
+                    data = win32clipboard.GetClipboardData()
+                    return {"success": True, "message": f"Clipboard: {data[:200]}", "text": data}
+                finally:
+                    win32clipboard.CloseClipboard()
+            except ImportError:
+                # Fallback using pyperclip or tkinter
+                try:
+                    import tkinter as tk
+                    root = tk.Tk()
+                    root.withdraw()
+                    data = root.clipboard_get()
+                    root.destroy()
+                    return {"success": True, "message": f"Clipboard: {data[:200]}", "text": data}
+                except Exception:
+                    return {"success": False, "message": "Could not read clipboard"}
+            except Exception as e:
+                return {"success": False, "message": f"Clipboard read failed: {str(e)}"}
+
+    # ─── Status ───────────────────────────────────────────────────────
+
+    def get_status(self) -> dict:
+        """Get automation engine status."""
+        return {
+            "pyautogui_available": self.pyautogui is not None,
+            "pygetwindow_available": self.pygetwindow is not None,
+        }

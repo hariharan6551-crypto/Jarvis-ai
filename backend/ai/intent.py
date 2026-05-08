@@ -1,22 +1,31 @@
 """
 J.A.R.V.I.S Intent Classification Engine
 Classifies user speech into actionable intents for command execution.
+Features: confidence scoring, 12+ intent categories, activate/deactivate detection.
 """
 
 import re
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Dict, List
 from core.logger import get_logger
 
 log = get_logger("intent")
 
-# Intent categories
+# ─── Intent Categories ───────────────────────────────────────────────
+
 INTENT_OPEN_APP = "open_app"
 INTENT_CLOSE_APP = "close_app"
 INTENT_SEARCH_WEB = "search_web"
 INTENT_SEARCH_YOUTUBE = "search_youtube"
+INTENT_SET_REMINDER = "set_reminder"
+INTENT_SYSTEM_CONTROL = "system_control"
+INTENT_PLAY_MEDIA = "play_media"
+INTENT_GET_WEATHER = "get_weather"
+INTENT_TYPE_TEXT = "type_text"
+INTENT_WINDOW_CONTROL = "window_control"
 INTENT_VOLUME_UP = "volume_up"
 INTENT_VOLUME_DOWN = "volume_down"
 INTENT_VOLUME_MUTE = "volume_mute"
+INTENT_VOLUME_SET = "volume_set"
 INTENT_BRIGHTNESS_UP = "brightness_up"
 INTENT_BRIGHTNESS_DOWN = "brightness_down"
 INTENT_SCREENSHOT = "screenshot"
@@ -28,12 +37,18 @@ INTENT_MEDIA_PLAY = "media_play"
 INTENT_MEDIA_PAUSE = "media_pause"
 INTENT_MEDIA_NEXT = "media_next"
 INTENT_MEDIA_PREV = "media_prev"
-INTENT_TYPE_TEXT = "type_text"
 INTENT_SYSTEM_INFO = "system_info"
-INTENT_CONVERSATION = "conversation"
+INTENT_CLIPBOARD_READ = "clipboard_read"
+INTENT_PRESS_KEY = "press_key"
+INTENT_TIME = "get_time"
+INTENT_DATE = "get_date"
+INTENT_ACTIVATE = "activate"
+INTENT_DEACTIVATE = "deactivate"
+INTENT_GENERAL_CONVERSATION = "general_conversation"
 INTENT_UNKNOWN = "unknown"
 
-# Application name mappings
+# ─── Application name mappings ───────────────────────────────────────
+
 APP_ALIASES = {
     "chrome": "chrome",
     "google chrome": "chrome",
@@ -83,107 +98,272 @@ APP_ALIASES = {
     "figma": "figma",
 }
 
-# Intent patterns
-PATTERNS = {
+# ─── Intent Patterns with Confidence Weights ─────────────────────────
+
+PATTERNS: Dict[str, List[Tuple[str, float]]] = {
+    # Activation / Deactivation
+    INTENT_ACTIVATE: [
+        (r"^(?:hey\s+)?jarvis$", 0.95),
+        (r"^wake\s+up", 0.90),
+        (r"^activate", 0.85),
+        (r"^turn\s+on\s+(?:jarvis|assistant)", 0.90),
+    ],
+    INTENT_DEACTIVATE: [
+        (r"^(?:turn\s+off|go\s+to\s+sleep|jarvis\s+stop|stop\s+listening|deactivate|good\s*night)", 0.95),
+        (r"^(?:shut\s+up|be\s+quiet|silence)", 0.80),
+    ],
+
+    # App Control
     INTENT_OPEN_APP: [
-        r"open\s+(.+)",
-        r"launch\s+(.+)",
-        r"start\s+(.+)",
-        r"run\s+(.+)",
+        (r"open\s+(.+)", 0.85),
+        (r"launch\s+(.+)", 0.85),
+        (r"start\s+(.+)", 0.80),
+        (r"run\s+(.+)", 0.75),
     ],
     INTENT_CLOSE_APP: [
-        r"close\s+(.+)",
-        r"quit\s+(.+)",
-        r"exit\s+(.+)",
-        r"kill\s+(.+)",
-        r"terminate\s+(.+)",
+        (r"close\s+(?:this\s+)?(?:window|app)?(.+)?", 0.85),
+        (r"quit\s+(.+)", 0.85),
+        (r"exit\s+(.+)", 0.80),
+        (r"kill\s+(.+)", 0.80),
+        (r"terminate\s+(.+)", 0.80),
     ],
+
+    # Web & Search
     INTENT_SEARCH_WEB: [
-        r"search\s+(?:google\s+)?(?:for\s+)?(.+)",
-        r"google\s+(.+)",
-        r"look\s+up\s+(.+)",
+        (r"search\s+(?:google\s+)?(?:for\s+)?(.+)", 0.85),
+        (r"google\s+(.+)", 0.85),
+        (r"look\s+up\s+(.+)", 0.80),
     ],
     INTENT_SEARCH_YOUTUBE: [
-        r"(?:search\s+)?youtube\s+(?:for\s+)?(.+)",
-        r"play\s+(?:on\s+)?youtube\s+(.+)",
-        r"find\s+(?:on\s+)?youtube\s+(.+)",
+        (r"(?:search\s+)?youtube\s+(?:for\s+)?(.+)", 0.90),
+        (r"play\s+(?:on\s+)?youtube\s+(.+)", 0.90),
+        (r"find\s+(?:on\s+)?youtube\s+(.+)", 0.85),
+        (r"play\s+(.+)\s+on\s+youtube", 0.90),
     ],
-    INTENT_VOLUME_UP: [r"(?:increase|raise|up|turn\s+up)\s+(?:the\s+)?volume"],
-    INTENT_VOLUME_DOWN: [r"(?:decrease|lower|down|turn\s+down)\s+(?:the\s+)?volume"],
-    INTENT_VOLUME_MUTE: [r"mute\s+(?:the\s+)?(?:volume|sound|audio)", r"unmute"],
-    INTENT_BRIGHTNESS_UP: [r"(?:increase|raise|up)\s+(?:the\s+)?brightness"],
-    INTENT_BRIGHTNESS_DOWN: [r"(?:decrease|lower|down)\s+(?:the\s+)?brightness"],
-    INTENT_SCREENSHOT: [r"(?:take\s+(?:a\s+)?)?screenshot", r"capture\s+screen"],
-    INTENT_SHUTDOWN: [r"shutdown", r"shut\s+down", r"power\s+off", r"turn\s+off\s+(?:the\s+)?(?:pc|computer)"],
-    INTENT_RESTART: [r"restart", r"reboot", r"restart\s+(?:the\s+)?(?:pc|computer|system)"],
-    INTENT_LOCK: [r"lock\s+(?:the\s+)?(?:pc|computer|screen)"],
-    INTENT_SLEEP: [r"sleep\s+(?:the\s+)?(?:pc|computer)", r"put\s+(?:the\s+)?(?:pc|computer)\s+to\s+sleep"],
-    INTENT_MEDIA_PLAY: [r"play\s+(?:music|media|song)", r"resume\s+(?:music|media|playback)"],
-    INTENT_MEDIA_PAUSE: [r"pause\s+(?:music|media|song|playback)", r"stop\s+(?:music|media|playback)"],
-    INTENT_MEDIA_NEXT: [r"next\s+(?:song|track)", r"skip\s+(?:song|track)"],
-    INTENT_MEDIA_PREV: [r"previous\s+(?:song|track)", r"(?:go\s+)?back\s+(?:song|track)"],
+
+    # Volume
+    INTENT_VOLUME_UP: [
+        (r"(?:increase|raise|up|turn\s+up)\s+(?:the\s+)?volume", 0.90),
+        (r"volume\s+up", 0.90),
+        (r"louder", 0.85),
+    ],
+    INTENT_VOLUME_DOWN: [
+        (r"(?:decrease|lower|down|turn\s+down)\s+(?:the\s+)?volume", 0.90),
+        (r"volume\s+down", 0.90),
+        (r"quieter", 0.85),
+    ],
+    INTENT_VOLUME_MUTE: [
+        (r"mute\s+(?:the\s+)?(?:volume|sound|audio)", 0.90),
+        (r"unmute", 0.90),
+        (r"toggle\s+mute", 0.85),
+    ],
+    INTENT_VOLUME_SET: [
+        (r"set\s+(?:the\s+)?volume\s+(?:to\s+)?(\d+)\s*%?", 0.95),
+        (r"volume\s+(?:to\s+)?(\d+)\s*%?", 0.85),
+    ],
+
+    # Brightness
+    INTENT_BRIGHTNESS_UP: [
+        (r"(?:increase|raise|up)\s+(?:the\s+)?brightness", 0.90),
+        (r"brighter", 0.85),
+    ],
+    INTENT_BRIGHTNESS_DOWN: [
+        (r"(?:decrease|lower|down)\s+(?:the\s+)?brightness", 0.90),
+        (r"dimmer", 0.85),
+    ],
+
+    # Screenshot
+    INTENT_SCREENSHOT: [
+        (r"(?:take\s+(?:a\s+)?)?screenshot", 0.90),
+        (r"capture\s+(?:the\s+)?screen", 0.90),
+        (r"screen\s*(?:shot|cap)", 0.85),
+    ],
+
+    # System Control
+    INTENT_SHUTDOWN: [
+        (r"shutdown\s*(?:the\s+)?(?:pc|computer)?", 0.90),
+        (r"shut\s+down", 0.90),
+        (r"power\s+off", 0.90),
+        (r"turn\s+off\s+(?:the\s+)?(?:pc|computer)", 0.90),
+    ],
+    INTENT_RESTART: [
+        (r"restart\s*(?:the\s+)?(?:pc|computer|system)?", 0.90),
+        (r"reboot", 0.90),
+    ],
+    INTENT_LOCK: [
+        (r"lock\s+(?:the\s+)?(?:pc|computer|screen)", 0.90),
+        (r"lock\s+screen", 0.90),
+    ],
+    INTENT_SLEEP: [
+        (r"(?:put\s+(?:the\s+)?(?:pc|computer)\s+to\s+)?sleep", 0.80),
+        (r"sleep\s+(?:the\s+)?(?:pc|computer|mode)", 0.85),
+    ],
+
+    # Media Controls
+    INTENT_MEDIA_PLAY: [
+        (r"(?:play|resume)\s+(?:music|media|song|playback)", 0.90),
+        (r"^play$", 0.75),
+    ],
+    INTENT_MEDIA_PAUSE: [
+        (r"(?:pause|stop)\s+(?:music|media|song|playback)", 0.90),
+        (r"^pause$", 0.80),
+    ],
+    INTENT_MEDIA_NEXT: [
+        (r"(?:next|skip)\s+(?:song|track)", 0.90),
+        (r"^next$", 0.75),
+        (r"^skip$", 0.75),
+    ],
+    INTENT_MEDIA_PREV: [
+        (r"(?:previous|back|last)\s+(?:song|track)", 0.90),
+        (r"^previous$", 0.80),
+    ],
+
+    # System Info
     INTENT_SYSTEM_INFO: [
-        r"system\s+(?:info|information|status|stats)",
-        r"(?:how\s+(?:is\s+)?(?:the\s+)?)?(?:cpu|ram|memory|disk|battery)\s+(?:usage|status)?",
-        r"(?:what(?:'s|\s+is)\s+(?:the\s+)?)?(?:cpu|ram|memory|disk|battery)",
+        (r"(?:system|pc|computer)\s+(?:info|information|status|stats)", 0.90),
+        (r"(?:how\s+(?:is\s+)?(?:the\s+)?)?(?:cpu|ram|memory|disk|battery)\s*(?:usage|status)?", 0.85),
+        (r"(?:what(?:'s|\s+is)\s+(?:the\s+)?)?(?:cpu|ram|memory|disk|battery)", 0.85),
     ],
-    INTENT_TYPE_TEXT: [r"type\s+(.+)", r"write\s+(.+)"],
+
+    # Time & Date
+    INTENT_TIME: [
+        (r"what\s*(?:'s|\s+is)\s+(?:the\s+)?time", 0.95),
+        (r"tell\s+(?:me\s+)?(?:the\s+)?time", 0.90),
+        (r"what\s+time\s+is\s+it", 0.95),
+        (r"current\s+time", 0.90),
+    ],
+    INTENT_DATE: [
+        (r"what\s*(?:'s|\s+is)\s+(?:the\s+)?(?:date|day)", 0.95),
+        (r"what\s+day\s+is\s+it", 0.95),
+        (r"today(?:'s)?\s+date", 0.90),
+    ],
+
+    # Typing & Keyboard
+    INTENT_TYPE_TEXT: [
+        (r"type\s+(.+)", 0.90),
+        (r"write\s+(.+)", 0.80),
+    ],
+    INTENT_PRESS_KEY: [
+        (r"press\s+(.+)", 0.90),
+        (r"hit\s+(.+)", 0.80),
+    ],
+    INTENT_CLIPBOARD_READ: [
+        (r"read\s+(?:the\s+)?clipboard", 0.90),
+        (r"what(?:'s|\s+is)\s+(?:in\s+)?(?:the\s+)?clipboard", 0.90),
+        (r"paste\s+(?:the\s+)?clipboard", 0.80),
+    ],
+
+    # Window Management
+    INTENT_WINDOW_CONTROL: [
+        (r"(?:maximize|max)\s+(?:the\s+)?window", 0.90),
+        (r"(?:minimize|min)\s+(?:the\s+)?window", 0.90),
+        (r"minimize\s+everything", 0.90),
+        (r"show\s+desktop", 0.90),
+        (r"snap\s+(?:to\s+)?(?:the\s+)?(?:left|right)", 0.90),
+        (r"move\s+(?:to\s+)?(?:second|other)\s+monitor", 0.85),
+        (r"switch\s+(?:to\s+)?(.+)", 0.80),
+        (r"alt\s+tab", 0.85),
+    ],
+
+    # Reminders
+    INTENT_SET_REMINDER: [
+        (r"remind\s+me\s+(?:in\s+)?(\d+)\s*(?:minutes?|mins?|hours?|hrs?|seconds?|secs?)\s+(?:to\s+)?(.+)", 0.95),
+        (r"set\s+(?:a\s+)?reminder\s+(.+)", 0.90),
+        (r"(?:what\s+are\s+)?(?:my\s+)?reminders", 0.85),
+        (r"cancel\s+(?:all\s+)?reminders?", 0.90),
+    ],
+
+    # Weather
+    INTENT_GET_WEATHER: [
+        (r"(?:what(?:'s|\s+is)\s+)?(?:the\s+)?weather", 0.90),
+        (r"(?:how(?:'s|\s+is)\s+)?(?:the\s+)?weather", 0.90),
+        (r"temperature\s+(?:outside|today)?", 0.85),
+        (r"(?:is\s+it\s+)?(?:raining|sunny|cloudy|cold|hot)", 0.75),
+    ],
 }
+
+# Confidence threshold — reject below this
+CONFIDENCE_THRESHOLD = 0.4
 
 
 class IntentClassifier:
-    """Classifies user input into actionable intents."""
+    """Classifies user input into actionable intents with confidence scoring."""
 
-    def classify(self, text: str) -> Tuple[str, Optional[str]]:
+    def classify(self, text: str) -> Tuple[str, Optional[str], float]:
         """
         Classify text into intent and extract parameters.
-        Returns (intent, parameter) tuple.
+        Returns (intent, parameter, confidence) tuple.
         """
         if not text:
-            return INTENT_UNKNOWN, None
+            log.info("Intent: unknown (empty input), confidence: 0.0")
+            return INTENT_UNKNOWN, None, 0.0
 
         text_lower = text.lower().strip()
 
-        # Remove wake word
+        # Remove wake word prefix
         for prefix in ["jarvis", "hey jarvis", "ok jarvis", "j.a.r.v.i.s"]:
             if text_lower.startswith(prefix):
                 text_lower = text_lower[len(prefix):].strip()
-                # Remove leading comma or period
                 text_lower = text_lower.lstrip(",.!? ")
                 break
 
         if not text_lower:
-            return INTENT_CONVERSATION, None
+            log.info("Intent: activate (wake word only), confidence: 0.95")
+            return INTENT_ACTIVATE, None, 0.95
 
-        # Check YouTube search first (before generic search)
-        for pattern in PATTERNS[INTENT_SEARCH_YOUTUBE]:
-            match = re.search(pattern, text_lower)
-            if match:
-                query = match.group(1).strip() if match.lastindex else ""
-                log.info(f"Intent: search_youtube, query: {query}")
-                return INTENT_SEARCH_YOUTUBE, query
+        # Check YouTube search first (before generic search captures it)
+        best_intent = None
+        best_param = None
+        best_confidence = 0.0
 
-        # Check all other patterns
         for intent, patterns in PATTERNS.items():
-            if intent == INTENT_SEARCH_YOUTUBE:
-                continue
-            for pattern in patterns:
-                match = re.search(pattern, text_lower)
-                if match:
-                    param = match.group(1).strip() if match.lastindex and match.lastindex >= 1 else None
+            for pattern, weight in patterns:
+                try:
+                    match = re.search(pattern, text_lower)
+                    if match:
+                        # Calculate confidence
+                        confidence = weight
 
-                    # Resolve app names for open/close intents
-                    if intent in (INTENT_OPEN_APP, INTENT_CLOSE_APP) and param:
-                        param = self._resolve_app(param)
+                        # Boost for exact/full match
+                        if match.group(0) == text_lower:
+                            confidence = min(1.0, confidence + 0.05)
 
-                    log.info(f"Intent: {intent}, param: {param}")
-                    return intent, param
+                        if confidence > best_confidence:
+                            best_confidence = confidence
+                            best_intent = intent
 
-        # Default to conversation
-        log.info(f"Intent: conversation (no pattern matched)")
-        return INTENT_CONVERSATION, text_lower
+                            # Extract parameter
+                            if match.lastindex and match.lastindex >= 1:
+                                param = match.group(1).strip()
+                                # Resolve app names for open/close intents
+                                if intent in (INTENT_OPEN_APP, INTENT_CLOSE_APP) and param:
+                                    param = self._resolve_app(param)
+                                best_param = param
+                            else:
+                                best_param = None
+                except re.error:
+                    continue
+
+        # Apply confidence threshold
+        if best_intent and best_confidence >= CONFIDENCE_THRESHOLD:
+            log.info(
+                f"Intent: {best_intent}, param: {best_param}, "
+                f"confidence: {best_confidence:.2f}, input: '{text_lower}'"
+            )
+            return best_intent, best_param, best_confidence
+
+        # Default fallback: general_conversation
+        log.info(
+            f"Intent: general_conversation (no pattern matched above threshold), "
+            f"best was: {best_intent} @ {best_confidence:.2f}, input: '{text_lower}'"
+        )
+        return INTENT_GENERAL_CONVERSATION, text_lower, 0.5
 
     def _resolve_app(self, app_name: str) -> str:
         """Resolve app alias to executable name."""
         app_lower = app_name.lower().strip()
         return APP_ALIASES.get(app_lower, app_lower)
+
+    def get_all_intents(self) -> list:
+        """Return list of all supported intent names."""
+        return list(PATTERNS.keys()) + [INTENT_GENERAL_CONVERSATION, INTENT_UNKNOWN]

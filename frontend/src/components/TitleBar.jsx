@@ -4,9 +4,11 @@ export default function TitleBar() {
   const [time, setTime] = useState(new Date());
   useEffect(() => { const t = setInterval(() => setTime(new Date()), 1000); return () => clearInterval(t); }, []);
 
-  const minimize = () => { try { require('electron').ipcRenderer.send('window-minimize'); } catch {} };
-  const maximize = () => { try { require('electron').ipcRenderer.send('window-maximize'); } catch {} };
-  const close = () => { try { require('electron').ipcRenderer.send('window-close'); } catch {} };
+  // Use secure contextBridge API (from preload.cjs) or graceful fallback for browser
+  const api = window.jarvisAPI || null;
+  const minimize = () => { if (api) api.minimize(); };
+  const maximize = () => { if (api) api.maximize(); };
+  const close = () => { if (api) api.close(); };
 
   return (
     <div className="title-bar">
@@ -25,9 +27,9 @@ export default function TitleBar() {
           <div style={{ fontSize: 9 }}>{time.toLocaleDateString([], { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</div>
         </div>
         <div className="title-bar-btns">
-          <button className="title-bar-btn btn-min" onClick={minimize} />
-          <button className="title-bar-btn btn-max" onClick={maximize} />
-          <button className="title-bar-btn btn-close" onClick={close} />
+          <button className="title-bar-btn btn-min" onClick={minimize} title="Minimize" />
+          <button className="title-bar-btn btn-max" onClick={maximize} title="Maximize" />
+          <button className="title-bar-btn btn-close" onClick={close} title="Close" />
         </div>
       </div>
     </div>

@@ -1,10 +1,11 @@
 """
-J.A.R.V.I.S Command Execution Orchestrator v2.0
-Central brain connecting AI planning, automation, browser control, vision, and memory.
-Routes commands through the AI task planner for multi-step execution.
+J.A.R.V.I.S Command Execution Orchestrator v2.5
+Central brain connecting AI planning, automation, browser control, vision, memory,
+reminders, notifications, and background services.
 """
 
 import asyncio
+import json
 import time
 from typing import Optional
 from core.logger import get_logger
@@ -16,15 +17,18 @@ from ai.planner import (
     STEP_WAIT, STEP_SCREENSHOT, STEP_READ_SCREEN,
     STEP_SYSTEM_CMD, STEP_VOLUME, STEP_BRIGHTNESS,
     STEP_MEDIA, STEP_SWITCH_WINDOW, STEP_FILE_OP,
-    STEP_SPEAK, STEP_CONVERSATION,
+    STEP_SPEAK, STEP_CONVERSATION, STEP_SET_REMINDER,
+    STEP_CLIPBOARD, STEP_WINDOW_CTRL,
 )
 from automation.engine import AutomationEngine
 from automation.browser import BrowserEngine
 from automation.vision import VisionEngine
-from automation.workflows import WorkflowEngine, Workflow, WorkflowStep
+from automation.workflows import WorkflowEngine
 from ai.provider import AIProvider
 from memory.engine import MemoryEngine
 from memory.preferences import PreferenceEngine
+from services.reminder import ReminderService
+from services.notification import NotificationService
 from config.settings import settings
 
 log = get_logger("orchestrator")
@@ -46,11 +50,13 @@ You can:
 - Navigate files and folders
 - Provide system information (CPU, RAM, disk, battery)
 - Remember user preferences and habits
-- Execute multi-step automated workflows"""
+- Execute multi-step automated workflows
+- Set reminders
+- Read clipboard contents"""
 
 
 class Orchestrator:
-    """Central command orchestrator v2.0 — connects all engines."""
+    """Central command orchestrator v2.5 — connects all engines and services."""
 
     def __init__(self):
         self.ai_provider = AIProvider()
@@ -60,12 +66,25 @@ class Orchestrator:
         self.workflow_engine = WorkflowEngine()
         self.memory = MemoryEngine()
         self.preferences = PreferenceEngine()
+        self.reminder_service = ReminderService()
+        self.notification_service = NotificationService()
         self.planner = TaskPlanner(ai_provider=self.ai_provider)
         self.conversation_id = self.memory.create_conversation("Main Session")
-        log.info("Orchestrator v2.0 initialized — all engines online")
+        self._step_timeout = 10  # seconds per step
+        log.info("Orchestrator v2.5 initialized — all engines online")
+
+    async def start_services(self):
+        """Start background services."""
+        await self.reminder_service.start()
+        log.info("Background services started")
+
+    async def stop_services(self):
+        """Stop background services."""
+        await self.reminder_service.stop()
+        log.info("Background services stopped")
 
     async def process_command(self, text: str) -> dict:
-        """Process a user command through the full v2.0 pipeline."""
+        """Process a user command through the full pipeline."""
         start_time = time.time()
 
         # Store user message
@@ -81,7 +100,12 @@ class Orchestrator:
         # Track usage
         duration_ms = (time.time() - start_time) * 1000
         intent = plan[0]["type"] if plan else "unknown"
-        self.memory.log_command(text, intent, result.get("status", "success"), str(result.get("message", "")), duration_ms)
+        self.memory.log_command(
+            text, intent,
+            result.get("status", "success"),
+            str(result.get("message", "")),
+            duration_ms
+        )
         self.preferences.track_command(intent, duration_ms)
 
         # Store assistant response
@@ -94,15 +118,18 @@ class Orchestrator:
         result["plan_steps"] = len(plan)
         return result
 
-    async def _execute_plan(self, plan: list[dict], original_text: str) -> dict:
-        """Execute a sequence of planned steps."""
+    async def _execute_plan(self, plan: list, original_text: str) -> dict:
+        """Execute a sequence of planned steps with timeout per step."""
         if not plan:
             return {"success": True, "needs_ai_response": True, "message": ""}
 
-        # Single conversation step — just get AI response
+        # Single conversation step
         if len(plan) == 1 and plan[0]["type"] == STEP_CONVERSATION:
             ai_response = await self._generate_ai_response(original_text, {})
-            return {"success": True, "message": ai_response, "ai_response": ai_response, "status": "success"}
+            return {
+                "success": True, "message": ai_response,
+                "ai_response": ai_response, "status": "success"
+            }
 
         # Multi-step execution
         messages = []
@@ -113,10 +140,14 @@ class Orchestrator:
             step_type = step["type"]
             param = step.get("param")
 
-            log.info(f"Executing step {i+1}/{len(plan)}: {step_type} -> {param}")
+            log.info(f"Executing step {i+1}/{len(plan)}: {step_type} → {param}")
 
             try:
-                result = await self._execute_step(step_type, param, original_text)
+                # Apply timeout per step
+                result = await asyncio.wait_for(
+                    self._execute_step(step_type, param, original_text),
+                    timeout=self._step_timeout
+                )
                 if isinstance(result, dict):
                     if not result.get("success", True):
                         all_success = False
@@ -126,6 +157,12 @@ class Orchestrator:
                     last_result = result
                 else:
                     last_result = {"success": True}
+
+            except asyncio.TimeoutError:
+                log.error(f"Step {step_type} timed out after {self._step_timeout}s — skipping")
+                all_success = False
+                messages.append(f"Step {step_type} timed out")
+
             except Exception as e:
                 log.error(f"Step {step_type} failed: {e}")
                 all_success = False
@@ -134,10 +171,13 @@ class Orchestrator:
         # Build final response
         final_message = messages[-1] if messages else "Done."
 
-        # If we need an AI-crafted response
         if last_result.get("needs_ai_response"):
             ai_response = await self._generate_ai_response(original_text, last_result)
-            return {"success": all_success, "message": ai_response, "ai_response": ai_response, "status": "success" if all_success else "partial"}
+            return {
+                "success": all_success, "message": ai_response,
+                "ai_response": ai_response,
+                "status": "success" if all_success else "partial"
+            }
 
         return {
             "success": all_success,
@@ -198,12 +238,7 @@ class Orchestrator:
             return await self._handle_system_cmd(param or "")
 
         elif step_type == STEP_VOLUME:
-            if param == "up":
-                return await self.automation.volume_up()
-            elif param == "down":
-                return await self.automation.volume_down()
-            else:
-                return await self.automation.volume_mute()
+            return await self._handle_volume(param or "")
 
         elif step_type == STEP_BRIGHTNESS:
             if param == "up":
@@ -233,8 +268,19 @@ class Orchestrator:
             ai_resp = await self._generate_ai_response(param or original_text, {})
             return {"success": True, "message": ai_resp, "ai_response": ai_resp, "needs_ai_response": False}
 
+        elif step_type == STEP_SET_REMINDER:
+            return await self._handle_reminder(param)
+
+        elif step_type == STEP_CLIPBOARD:
+            return await self.automation.read_clipboard()
+
+        elif step_type == STEP_WINDOW_CTRL:
+            return await self._handle_window_ctrl(param or "")
+
         else:
             return {"success": True, "needs_ai_response": True, "message": ""}
+
+    # ─── Sub-handlers ─────────────────────────────────────────────────
 
     async def _handle_system_cmd(self, cmd: str) -> dict:
         if cmd == "info":
@@ -251,11 +297,25 @@ class Orchestrator:
             return await self.automation.sleep_pc()
         return {"success": False, "message": f"Unknown system command: {cmd}"}
 
+    async def _handle_volume(self, param: str) -> dict:
+        if param == "up":
+            return await self.automation.volume_up()
+        elif param == "down":
+            return await self.automation.volume_down()
+        elif param == "mute":
+            return await self.automation.volume_mute()
+        elif param.startswith("set:"):
+            try:
+                level = int(param.split(":")[1])
+                return await self.automation.set_volume(level)
+            except (ValueError, IndexError):
+                return {"success": False, "message": "Invalid volume level"}
+        return await self.automation.volume_mute()
+
     async def _handle_file_op(self, param) -> dict:
-        import json as _json
         try:
             if isinstance(param, str):
-                data = _json.loads(param)
+                data = json.loads(param)
             else:
                 data = param or {}
             action = data.get("action", "open")
@@ -267,6 +327,26 @@ class Orchestrator:
             return {"success": False, "message": f"Unknown file action: {action}"}
         except Exception as e:
             return {"success": False, "message": str(e)}
+
+    async def _handle_reminder(self, param) -> dict:
+        try:
+            if isinstance(param, str):
+                data = json.loads(param)
+            else:
+                data = param or {}
+            seconds = data.get("seconds", 60)
+            task = data.get("task", "reminder")
+            result = await self.reminder_service.add_reminder(task, seconds)
+            return result
+        except Exception as e:
+            return {"success": False, "message": f"Reminder error: {str(e)}"}
+
+    async def _handle_window_ctrl(self, action: str) -> dict:
+        if action == "maximize":
+            return await self.automation.maximize_window()
+        elif action == "minimize":
+            return await self.automation.minimize_window()
+        return {"success": False, "message": f"Unknown window action: {action}"}
 
     def _resolve_app(self, app_name: str) -> str:
         """Resolve app name using the intent classifier's alias map."""
@@ -281,20 +361,21 @@ class Orchestrator:
             time=datetime.now().strftime("%A, %B %d, %Y %I:%M %p"),
         )
 
-        # Add context data
         if context.get("data"):
             user_message = f"{user_message}\n\nSystem data: {context['data']}"
         if context.get("text"):
             user_message = f"{user_message}\n\nScreen text (OCR): {context['text'][:2000]}"
 
-        # Add user preferences context
         user_ctx = self.preferences.get_user_context()
         if user_ctx.get("frequent_apps"):
             apps = [a["app_name"] for a in user_ctx["frequent_apps"][:3]]
             system_prompt += f"\nUser's frequent apps: {', '.join(apps)}"
 
         history = self.memory.get_recent_messages(limit=10)
-        formatted = [{"role": m["role"], "content": m["content"]} for m in history if m["role"] in ("user", "assistant")]
+        formatted = [
+            {"role": m["role"], "content": m["content"]}
+            for m in history if m["role"] in ("user", "assistant")
+        ]
 
         response = await self.ai_provider.chat(
             message=user_message,
@@ -317,6 +398,10 @@ class Orchestrator:
             "default_provider": settings.DEFAULT_AI_PROVIDER,
             "user": settings.USER_NAME,
             "version": settings.APP_VERSION,
-            "chrome_profiles": [{"name": p["name"], "email": p.get("email", "")} for p in chrome_profiles],
+            "chrome_profiles": [
+                {"name": p["name"], "email": p.get("email", "")}
+                for p in chrome_profiles
+            ],
             "frequent_apps": self.preferences.get_frequent_apps(5),
+            "reminders": self.reminder_service.get_pending(),
         }

@@ -1,20 +1,21 @@
 """
-J.A.R.V.I.S AI Task Planner
-Decomposes complex natural language commands into executable multi-step plans.
-Uses Gemini/OpenAI to reason about multi-step tasks.
+J.A.R.V.I.S Task Planner
+Decomposes complex natural language commands into executable step sequences.
+Features: asyncio.Queue execution, 10s timeout per step, task status tracking.
 """
 
 import asyncio
 import json
 import re
+import time
 from typing import Optional
 from core.logger import get_logger
 from config.settings import settings
 
 log = get_logger("planner")
 
+# ─── Step Type Constants ──────────────────────────────────────────────
 
-# Step types the planner can produce
 STEP_OPEN_APP = "open_app"
 STEP_CLOSE_APP = "close_app"
 STEP_BROWSER_PROFILE = "browser_profile"
@@ -30,287 +31,358 @@ STEP_READ_SCREEN = "read_screen"
 STEP_SYSTEM_CMD = "system_cmd"
 STEP_VOLUME = "volume"
 STEP_BRIGHTNESS = "brightness"
-STEP_MEDIA = "media_control"
+STEP_MEDIA = "media"
 STEP_SWITCH_WINDOW = "switch_window"
-STEP_FILE_OP = "file_operation"
+STEP_FILE_OP = "file_op"
 STEP_SPEAK = "speak"
 STEP_CONVERSATION = "conversation"
+STEP_SET_REMINDER = "set_reminder"
+STEP_CLIPBOARD = "clipboard"
+STEP_WINDOW_CTRL = "window_control"
 
-PLANNER_SYSTEM_PROMPT = """You are J.A.R.V.I.S, an AI task planner for a Windows desktop automation system.
-Your job is to decompose user commands into executable steps.
 
-AVAILABLE STEP TYPES:
-- open_app: Open an application. param = app name (chrome, notepad, vscode, excel, explorer, etc.)
-- close_app: Close an application. param = app name
-- browser_profile: Open Chrome with specific profile. param = profile name
-- navigate_url: Navigate browser to URL. param = URL
-- search_web: Search Google. param = search query
-- search_youtube: Search YouTube. param = search query
-- click_text: Click on text visible on screen (OCR). param = text to click
-- type_text: Type text at current cursor. param = text to type
-- press_key: Press keyboard shortcut. param = key combo (e.g., "ctrl+c", "enter", "alt+tab")
-- wait: Wait for seconds. param = seconds (e.g., "2")
-- screenshot: Take screenshot. param = null
-- read_screen: Read text from screen via OCR. param = null
-- system_cmd: Run system command. param = command string
-- volume: Volume control. param = "up", "down", or "mute"
-- brightness: Brightness control. param = "up" or "down"
-- media_control: Media control. param = "play", "pause", "next", "prev"
-- switch_window: Switch to a window. param = window title keyword
-- file_operation: File operation. param = JSON {"action": "open|create|delete", "path": "..."}
-- speak: Speak a message. param = message text
-- conversation: AI conversation response. param = original user message
+# ─── Task Status Tracking ────────────────────────────────────────────
 
-RULES:
-1. Return a JSON array of steps, each with "type" and "param"
-2. Keep plans minimal — fewest steps needed
-3. For simple single-action commands, return just one step
-4. For "open Chrome with profile X" → use browser_profile step
-5. Add wait steps between UI actions that need loading time
-6. Always end multi-step plans with a speak step confirming completion
-7. For conversational messages (greetings, questions), use conversation type
+class TaskStatus:
+    """Track the status of a single task."""
 
-EXAMPLES:
+    def __init__(self, task_id: str, command: str, plan: list):
+        self.task_id = task_id
+        self.command = command
+        self.plan = plan
+        self.status = "pending"  # pending, running, success, partial, failed
+        self.current_step = 0
+        self.total_steps = len(plan)
+        self.step_results = []
+        self.start_time = time.time()
+        self.end_time = None
+        self.error = None
 
-User: "Open Chrome and select Mersal Hariharan Google account"
-[{"type": "browser_profile", "param": "Mersal Hariharan"}, {"type": "wait", "param": "2"}, {"type": "speak", "param": "Chrome is now open with Mersal Hariharan's profile."}]
+    def to_dict(self) -> dict:
+        return {
+            "task_id": self.task_id,
+            "command": self.command,
+            "status": self.status,
+            "current_step": self.current_step,
+            "total_steps": self.total_steps,
+            "elapsed_ms": round((time.time() - self.start_time) * 1000, 2),
+            "error": self.error,
+        }
 
-User: "Open notepad and type hello world"
-[{"type": "open_app", "param": "notepad"}, {"type": "wait", "param": "1"}, {"type": "type_text", "param": "hello world"}, {"type": "speak", "param": "Done. I've typed hello world in Notepad."}]
 
-User: "Search YouTube for Python tutorials"
-[{"type": "search_youtube", "param": "Python tutorials"}]
-
-User: "What time is it?"
-[{"type": "conversation", "param": "What time is it?"}]
-
-User: "Increase volume and open Spotify"
-[{"type": "volume", "param": "up"}, {"type": "open_app", "param": "spotify"}, {"type": "speak", "param": "Volume increased and Spotify is opening."}]
-
-User: "Take a screenshot and save it"
-[{"type": "screenshot", "param": null}]
-
-Return ONLY the JSON array. No explanation, no markdown."""
-
+# ─── Task Planner ─────────────────────────────────────────────────────
 
 class TaskPlanner:
-    """Decomposes complex commands into sequential executable steps using AI."""
+    """AI-powered task planner that decomposes commands into executable steps."""
 
     def __init__(self, ai_provider=None):
         self.ai_provider = ai_provider
-        log.info("Task Planner initialized")
+        self._task_queue = asyncio.Queue()
+        self._task_history = []  # Recent task statuses
+        self._max_history = 50
+        self._step_timeout = 10  # seconds per step
+        self._is_processing = False
 
-    def set_ai_provider(self, provider):
-        """Set the AI provider (called after orchestrator init)."""
-        self.ai_provider = provider
-
-    async def plan(self, user_command: str) -> list[dict]:
-        """
-        Generate an execution plan from a natural language command.
-        Returns a list of steps: [{"type": "...", "param": "..."}, ...]
-        """
-        # Try quick pattern matching first for simple commands
-        quick_plan = self._quick_classify(user_command)
-        if quick_plan:
-            log.info(f"Quick plan for '{user_command}': {len(quick_plan)} steps")
-            return quick_plan
-
-        # Fall back to AI planning for complex commands
-        if self.ai_provider:
-            return await self._ai_plan(user_command)
-
-        # Absolute fallback: treat as conversation
-        return [{"type": STEP_CONVERSATION, "param": user_command}]
-
-    def _quick_classify(self, text: str) -> Optional[list[dict]]:
-        """Fast regex-based classification for simple commands."""
-        t = text.lower().strip()
-
-        # Remove wake word
-        for prefix in ["jarvis", "hey jarvis", "ok jarvis", "j.a.r.v.i.s"]:
-            if t.startswith(prefix):
-                t = t[len(prefix):].strip().lstrip(",.!? ")
-                break
-
-        if not t:
-            return [{"type": STEP_CONVERSATION, "param": "hello"}]
-
-        # Compound commands with "and" → let AI handle (except chrome profile commands)
-        if " and " in t and not re.search(r"chrome.*and\s+(?:select|choose|use|open)", t):
-            parts = t.split(" and ")
-            if len(parts) > 1 and all(len(p.strip()) > 2 for p in parts):
-                return None  # Route to AI planner for multi-step decomposition
-
-        # Chrome with profile
-        chrome_profile = re.search(
-            r"(?:open|launch|start)\s+(?:google\s+)?chrome\s+(?:with|using|and\s+(?:select|choose|use|open))\s+(.+?)(?:\s+(?:account|profile|google\s+account))?$",
-            t, re.IGNORECASE
-        )
-        if chrome_profile:
-            profile_name = chrome_profile.group(1).strip()
-            # Clean up common suffixes
-            for suffix in ["account", "profile", "google account", "google"]:
-                if profile_name.lower().endswith(suffix):
-                    profile_name = profile_name[:-(len(suffix))].strip()
-            return [
-                {"type": STEP_BROWSER_PROFILE, "param": profile_name},
-                {"type": STEP_WAIT, "param": "2"},
-                {"type": STEP_SPEAK, "param": f"Chrome is now open with {profile_name}'s profile."},
-            ]
-
-        # Simple app open
-        app_match = re.match(r"(?:open|launch|start|run)\s+(.+)", t)
-        if app_match:
-            app = app_match.group(1).strip()
-            # Check if there's a compound command (open X and do Y)
-            if " and " in app:
-                return None  # Let AI handle compound commands
-            return [{"type": STEP_OPEN_APP, "param": app}]
-
-        # Close app
-        close_match = re.match(r"(?:close|quit|exit|kill)\s+(.+)", t)
-        if close_match:
-            return [{"type": STEP_CLOSE_APP, "param": close_match.group(1).strip()}]
-
-        # YouTube search
-        yt_match = re.search(r"(?:search\s+)?youtube\s+(?:for\s+)?(.+)", t)
-        if yt_match:
-            return [{"type": STEP_SEARCH_YOUTUBE, "param": yt_match.group(1).strip()}]
-
-        # Web search
-        search_match = re.search(r"(?:search|google)\s+(?:for\s+)?(.+)", t)
-        if search_match:
-            return [{"type": STEP_SEARCH_WEB, "param": search_match.group(1).strip()}]
-
-        # Volume
-        if re.search(r"(?:increase|raise|turn\s+up|up)\s+(?:the\s+)?volume", t):
-            return [{"type": STEP_VOLUME, "param": "up"}]
-        if re.search(r"(?:decrease|lower|turn\s+down|down)\s+(?:the\s+)?volume", t):
-            return [{"type": STEP_VOLUME, "param": "down"}]
-        if re.search(r"mute|unmute", t):
-            return [{"type": STEP_VOLUME, "param": "mute"}]
-
-        # Brightness
-        if re.search(r"(?:increase|raise|up)\s+(?:the\s+)?brightness", t):
-            return [{"type": STEP_BRIGHTNESS, "param": "up"}]
-        if re.search(r"(?:decrease|lower|down)\s+(?:the\s+)?brightness", t):
-            return [{"type": STEP_BRIGHTNESS, "param": "down"}]
-
-        # Screenshot
-        if re.search(r"screenshot|capture\s+screen", t):
-            return [{"type": STEP_SCREENSHOT, "param": None}]
-
-        # Media controls
-        if re.search(r"(?:play|resume)\s+(?:music|media|song)", t):
-            return [{"type": STEP_MEDIA, "param": "play"}]
-        if re.search(r"(?:pause|stop)\s+(?:music|media|song|playback)", t):
-            return [{"type": STEP_MEDIA, "param": "pause"}]
-        if re.search(r"(?:next|skip)\s+(?:song|track)", t):
-            return [{"type": STEP_MEDIA, "param": "next"}]
-        if re.search(r"(?:previous|back)\s+(?:song|track)", t):
-            return [{"type": STEP_MEDIA, "param": "prev"}]
-
-        # System commands
-        if re.search(r"(?:system|pc|computer)\s+(?:info|status|stats)", t):
-            return [{"type": STEP_SYSTEM_CMD, "param": "info"}]
-        if re.search(r"shutdown|shut\s+down|power\s+off", t):
-            return [{"type": STEP_SYSTEM_CMD, "param": "shutdown"}]
-        if re.search(r"restart|reboot", t):
-            return [{"type": STEP_SYSTEM_CMD, "param": "restart"}]
-        if re.search(r"lock\s+(?:the\s+)?(?:pc|computer|screen)", t):
-            return [{"type": STEP_SYSTEM_CMD, "param": "lock"}]
-        if re.search(r"sleep", t):
-            return [{"type": STEP_SYSTEM_CMD, "param": "sleep"}]
-
-        # Type text
-        type_match = re.match(r"(?:type|write)\s+(.+)", t)
-        if type_match:
-            return [{"type": STEP_TYPE_TEXT, "param": type_match.group(1).strip()}]
-
-        # Read screen
-        if re.search(r"read\s+(?:the\s+)?screen|what(?:'s|\s+is)\s+on\s+(?:the\s+)?screen", t):
-            return [{"type": STEP_READ_SCREEN, "param": None}]
-
-        # If contains "and" — likely multi-step, let AI handle
-        if " and " in t and len(t.split(" and ")) > 1:
-            return None
-
-        # Default: no quick match — return None to trigger AI planner
-        return None
-
-    async def _ai_plan(self, user_command: str) -> list[dict]:
-        """Use AI to generate a multi-step execution plan."""
-        try:
-            response = await self.ai_provider.chat(
-                message=f"User command: \"{user_command}\"\n\nGenerate the execution plan as a JSON array.",
-                system_prompt=PLANNER_SYSTEM_PROMPT,
-            )
-
-            # Extract JSON from response
-            plan = self._parse_plan_json(response)
-            if plan:
-                log.info(f"AI plan for '{user_command}': {len(plan)} steps")
-                return plan
-
-            log.warning(f"AI planner returned invalid response: {response[:200]}")
-            return [{"type": STEP_CONVERSATION, "param": user_command}]
-
-        except Exception as e:
-            log.error(f"AI planning failed: {e}")
-            return [{"type": STEP_CONVERSATION, "param": user_command}]
-
-    def _parse_plan_json(self, response: str) -> Optional[list[dict]]:
-        """Parse the AI response to extract the JSON plan."""
-        # Try direct parse
-        try:
-            plan = json.loads(response.strip())
-            if isinstance(plan, list):
-                return self._validate_plan(plan)
-        except json.JSONDecodeError:
-            pass
-
-        # Try to extract JSON from markdown code block
-        json_match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", response, re.DOTALL)
-        if json_match:
-            try:
-                plan = json.loads(json_match.group(1).strip())
-                if isinstance(plan, list):
-                    return self._validate_plan(plan)
-            except json.JSONDecodeError:
-                pass
-
-        # Try to find array in response
-        array_match = re.search(r"\[.*\]", response, re.DOTALL)
-        if array_match:
-            try:
-                plan = json.loads(array_match.group(0))
-                if isinstance(plan, list):
-                    return self._validate_plan(plan)
-            except json.JSONDecodeError:
-                pass
-
-        return None
-
-    def _validate_plan(self, plan: list) -> list[dict]:
-        """Validate and clean a parsed plan."""
-        valid_types = {
-            STEP_OPEN_APP, STEP_CLOSE_APP, STEP_BROWSER_PROFILE,
-            STEP_NAVIGATE_URL, STEP_SEARCH_WEB, STEP_SEARCH_YOUTUBE,
-            STEP_CLICK_TEXT, STEP_TYPE_TEXT, STEP_PRESS_KEY,
-            STEP_WAIT, STEP_SCREENSHOT, STEP_READ_SCREEN,
-            STEP_SYSTEM_CMD, STEP_VOLUME, STEP_BRIGHTNESS,
-            STEP_MEDIA, STEP_SWITCH_WINDOW, STEP_FILE_OP,
-            STEP_SPEAK, STEP_CONVERSATION,
+        # Chrome profile aliases (resolved during planning)
+        self._profile_patterns = {
+            "mersal hariharan": "Mersal Hariharan",
+            "hariharan": "Mersal Hariharan",
+            "mersal": "Mersal Hariharan",
+            "personal": "Personal",
+            "work": "Work",
+            "school": "School",
+            "college": "College",
         }
 
-        validated = []
-        for step in plan:
-            if isinstance(step, dict) and "type" in step:
-                if step["type"] in valid_types:
-                    validated.append({
-                        "type": step["type"],
-                        "param": step.get("param"),
-                    })
-                else:
-                    log.warning(f"Unknown step type: {step['type']}")
-        return validated if validated else None
+        log.info("Task planner initialized")
+
+    # ─── Quick Classification (no AI needed) ──────────────────────────
+
+    def _quick_classify(self, text: str) -> Optional[list]:
+        """
+        Fast local classification for common commands.
+        Returns a plan (list of steps) or None if AI is needed.
+        """
+        text_lower = text.lower().strip()
+
+        # Remove wake word prefix
+        for prefix in ["jarvis", "hey jarvis", "ok jarvis"]:
+            if text_lower.startswith(prefix):
+                text_lower = text_lower[len(prefix):].strip()
+                text_lower = text_lower.lstrip(",.!? ")
+                break
+
+        if not text_lower:
+            return [{"type": STEP_CONVERSATION, "param": "hello"}]
+
+        # ── Chrome with profile ──
+        profile_match = re.search(
+            r"open\s+chrome\s+(?:and\s+)?(?:select|use|with|load|switch\s+to)\s+(.+?)(?:\s+account|\s+profile)?$",
+            text_lower,
+        )
+        if profile_match:
+            profile_name = profile_match.group(1).strip()
+            resolved = self._resolve_profile(profile_name)
+            return [
+                {"type": STEP_OPEN_APP, "param": "chrome"},
+                {"type": STEP_WAIT, "param": "1"},
+                {"type": STEP_BROWSER_PROFILE, "param": resolved},
+            ]
+
+        # ── Open app ──
+        open_match = re.match(r"(?:open|launch|start|run)\s+(.+)", text_lower)
+        if open_match:
+            app = open_match.group(1).strip()
+            return [{"type": STEP_OPEN_APP, "param": app}]
+
+        # ── Close app ──
+        close_match = re.match(r"(?:close|quit|exit|kill|terminate)\s+(.+)", text_lower)
+        if close_match:
+            app = close_match.group(1).strip()
+            return [{"type": STEP_CLOSE_APP, "param": app}]
+
+        # ── YouTube search ──
+        yt_match = re.match(
+            r"(?:search\s+youtube\s+for|youtube\s+search|play\s+on\s+youtube|find\s+on\s+youtube)\s+(.+)",
+            text_lower,
+        )
+        if yt_match:
+            query = yt_match.group(1).strip()
+            return [{"type": STEP_SEARCH_YOUTUBE, "param": query}]
+
+        # ── Web search ──
+        search_match = re.match(
+            r"(?:search|google|look\s+up)\s+(?:for\s+)?(.+)",
+            text_lower,
+        )
+        if search_match and "youtube" not in text_lower:
+            query = search_match.group(1).strip()
+            return [{"type": STEP_SEARCH_WEB, "param": query}]
+
+        # ── Volume ──
+        if re.search(r"(?:increase|raise|turn\s+up)\s+(?:the\s+)?volume|volume\s+up|louder", text_lower):
+            return [{"type": STEP_VOLUME, "param": "up"}]
+        if re.search(r"(?:decrease|lower|turn\s+down)\s+(?:the\s+)?volume|volume\s+down|quieter", text_lower):
+            return [{"type": STEP_VOLUME, "param": "down"}]
+        if re.search(r"mute|unmute", text_lower):
+            return [{"type": STEP_VOLUME, "param": "mute"}]
+
+        vol_match = re.search(r"(?:set\s+)?volume\s+(?:to\s+)?(\d+)", text_lower)
+        if vol_match:
+            return [{"type": STEP_VOLUME, "param": f"set:{vol_match.group(1)}"}]
+
+        # ── Brightness ──
+        if re.search(r"(?:increase|raise)\s+(?:the\s+)?brightness|brighter", text_lower):
+            return [{"type": STEP_BRIGHTNESS, "param": "up"}]
+        if re.search(r"(?:decrease|lower)\s+(?:the\s+)?brightness|dimmer", text_lower):
+            return [{"type": STEP_BRIGHTNESS, "param": "down"}]
+
+        # ── Screenshot ──
+        if re.search(r"(?:take\s+(?:a\s+)?)?screenshot|capture\s+(?:the\s+)?screen", text_lower):
+            return [{"type": STEP_SCREENSHOT, "param": None}]
+
+        # ── System ──
+        if re.search(r"shutdown|shut\s+down|power\s+off", text_lower):
+            return [{"type": STEP_SYSTEM_CMD, "param": "shutdown"}]
+        if re.search(r"restart|reboot", text_lower):
+            return [{"type": STEP_SYSTEM_CMD, "param": "restart"}]
+        if re.search(r"lock\s+(?:the\s+)?(?:pc|computer|screen)", text_lower):
+            return [{"type": STEP_SYSTEM_CMD, "param": "lock"}]
+        if re.search(r"sleep\s+(?:the\s+)?(?:pc|computer|mode)", text_lower):
+            return [{"type": STEP_SYSTEM_CMD, "param": "sleep"}]
+        if re.search(r"(?:system|pc|computer)\s+(?:info|status|stats)|(?:cpu|ram|memory|battery)\s*(?:usage)?", text_lower):
+            return [{"type": STEP_SYSTEM_CMD, "param": "info"}]
+
+        # ── Media ──
+        if re.search(r"(?:play|resume)\s+(?:music|media|song|playback)|^play$", text_lower):
+            return [{"type": STEP_MEDIA, "param": "play"}]
+        if re.search(r"(?:pause|stop)\s+(?:music|media|song|playback)|^pause$", text_lower):
+            return [{"type": STEP_MEDIA, "param": "pause"}]
+        if re.search(r"(?:next|skip)\s+(?:song|track)|^next$|^skip$", text_lower):
+            return [{"type": STEP_MEDIA, "param": "next"}]
+        if re.search(r"(?:previous|back|last)\s+(?:song|track)|^previous$", text_lower):
+            return [{"type": STEP_MEDIA, "param": "prev"}]
+
+        # ── Type text ──
+        type_match = re.match(r"(?:type|write)\s+(.+)", text_lower)
+        if type_match:
+            return [{"type": STEP_TYPE_TEXT, "param": type_match.group(1)}]
+
+        # ── Press key ──
+        key_match = re.match(r"(?:press|hit)\s+(.+)", text_lower)
+        if key_match:
+            return [{"type": STEP_PRESS_KEY, "param": key_match.group(1)}]
+
+        # ── Reminders ──
+        reminder_match = re.match(
+            r"remind\s+me\s+(?:in\s+)?(\d+)\s*(minutes?|mins?|hours?|hrs?|seconds?|secs?)\s+(?:to\s+)?(.+)",
+            text_lower,
+        )
+        if reminder_match:
+            amount = int(reminder_match.group(1))
+            unit = reminder_match.group(2).lower()
+            task = reminder_match.group(3).strip()
+            if unit.startswith("h"):
+                seconds = amount * 3600
+            elif unit.startswith("m"):
+                seconds = amount * 60
+            else:
+                seconds = amount
+            return [{"type": STEP_SET_REMINDER, "param": json.dumps({"seconds": seconds, "task": task})}]
+
+        # ── Window control ──
+        if re.search(r"(?:maximize|max)\s+(?:the\s+)?window", text_lower):
+            return [{"type": STEP_WINDOW_CTRL, "param": "maximize"}]
+        if re.search(r"(?:minimize|min)\s+(?:the\s+)?window|minimize\s+everything|show\s+desktop", text_lower):
+            return [{"type": STEP_WINDOW_CTRL, "param": "minimize"}]
+        if re.search(r"alt\s+tab", text_lower):
+            return [{"type": STEP_PRESS_KEY, "param": "alt+tab"}]
+
+        # ── Time / Date ──
+        if re.search(r"what\s*(?:'s|\s+is)\s+(?:the\s+)?time|what\s+time|current\s+time", text_lower):
+            from datetime import datetime
+            now = datetime.now().strftime("%I:%M %p")
+            return [{"type": STEP_SPEAK, "param": f"The current time is {now}"}]
+        if re.search(r"what\s*(?:'s|\s+is)\s+(?:the\s+)?(?:date|day)|today", text_lower):
+            from datetime import datetime
+            today = datetime.now().strftime("%A, %B %d, %Y")
+            return [{"type": STEP_SPEAK, "param": f"Today is {today}"}]
+
+        # ── Clipboard ──
+        if re.search(r"read\s+(?:the\s+)?clipboard|what(?:'s|\s+is)\s+(?:in\s+)?(?:the\s+)?clipboard", text_lower):
+            return [{"type": STEP_CLIPBOARD, "param": "read"}]
+
+        # ── Simple greetings ──
+        greetings = ["hello", "hi", "hey", "good morning", "good afternoon", "good evening", "howdy", "how are you"]
+        if text_lower in greetings or any(text_lower.startswith(g) for g in greetings):
+            return [{"type": STEP_CONVERSATION, "param": text_lower}]
+
+        # Not a simple command — needs AI planning
+        return None
+
+    # ─── AI-Powered Planning ──────────────────────────────────────────
+
+    PLANNING_PROMPT = """You are J.A.R.V.I.S, a Windows PC assistant. Decompose the user's command into executable steps.
+
+Available step types:
+- open_app: Open an application (param: app name like "chrome", "notepad", "vscode")
+- close_app: Close an application (param: app name)
+- browser_profile: Open Chrome with a specific profile (param: profile name)
+- navigate_url: Navigate to URL (param: full URL)
+- search_web: Search Google (param: search query)
+- search_youtube: Search YouTube (param: search query)
+- click_text: Click on screen text using OCR (param: text to click)
+- type_text: Type text (param: text to type)
+- press_key: Press keyboard shortcut (param: key combo like "ctrl+c")
+- wait: Wait seconds (param: number of seconds)
+- screenshot: Take screenshot (param: null)
+- read_screen: Read screen text via OCR (param: null)
+- system_cmd: System command (param: info/shutdown/restart/lock/sleep)
+- volume: Volume control (param: up/down/mute/set:50)
+- brightness: Brightness control (param: up/down)
+- media: Media control (param: play/pause/next/prev)
+- switch_window: Switch to window (param: window title)
+- speak: Say something (param: text to speak)
+- conversation: AI conversation response (param: topic)
+
+Output ONLY a JSON array of steps. Example:
+[{"type": "open_app", "param": "chrome"}, {"type": "wait", "param": "2"}, {"type": "search_web", "param": "python tutorials"}]
+
+User command: {command}"""
+
+    async def plan(self, command: str) -> list:
+        """Generate an execution plan for a command."""
+        # Try quick classification first (fast, no AI call)
+        quick_plan = self._quick_classify(command)
+        if quick_plan is not None:
+            log.info(f"Quick plan for '{command}': {[s['type'] for s in quick_plan]}")
+            return quick_plan
+
+        # Fall back to AI planning
+        if self.ai_provider and settings.USE_AI_PLANNER:
+            try:
+                plan = await self._ai_plan(command)
+                if plan:
+                    log.info(f"AI plan for '{command}': {[s['type'] for s in plan]}")
+                    return plan
+            except Exception as e:
+                log.error(f"AI planning failed: {e}")
+
+        # Ultimate fallback: treat as conversation
+        log.info(f"Fallback to conversation for: '{command}'")
+        return [{"type": STEP_CONVERSATION, "param": command}]
+
+    async def _ai_plan(self, command: str) -> Optional[list]:
+        """Use AI to decompose a complex command into steps."""
+        if not self.ai_provider:
+            return None
+
+        try:
+            prompt = self.PLANNING_PROMPT.format(command=command)
+            response = await self.ai_provider.chat(
+                message=prompt,
+                system_prompt="You output only valid JSON arrays of step objects. No explanation.",
+            )
+
+            # Parse JSON from response
+            response = response.strip()
+            # Remove markdown code blocks if present
+            if response.startswith("```"):
+                response = re.sub(r"```(?:json)?\s*", "", response)
+                response = re.sub(r"\s*```$", "", response)
+
+            plan = json.loads(response)
+            if isinstance(plan, list) and all(isinstance(s, dict) and "type" in s for s in plan):
+                return plan
+
+            log.warning(f"Invalid AI plan format: {response[:200]}")
+            return None
+        except json.JSONDecodeError as e:
+            log.error(f"AI plan JSON parse error: {e}")
+            return None
+        except Exception as e:
+            log.error(f"AI plan generation failed: {e}")
+            return None
+
+    # ─── Profile Resolution ───────────────────────────────────────────
+
+    def _resolve_profile(self, name: str) -> str:
+        """Resolve a spoken profile name to actual Chrome profile name."""
+        name_lower = name.lower().strip()
+        return self._profile_patterns.get(name_lower, name.title())
+
+    # ─── Task Queue ───────────────────────────────────────────────────
+
+    async def enqueue_task(self, command: str) -> str:
+        """Add a task to the async queue. Returns task ID."""
+        import uuid
+        task_id = str(uuid.uuid4())[:8]
+        plan = await self.plan(command)
+        status = TaskStatus(task_id, command, plan)
+        await self._task_queue.put((task_id, command, plan, status))
+        self._task_history.append(status)
+        if len(self._task_history) > self._max_history:
+            self._task_history = self._task_history[-self._max_history:]
+        log.info(f"Task {task_id} queued: '{command}' ({len(plan)} steps)")
+        return task_id
+
+    def get_task_status(self, task_id: str) -> Optional[dict]:
+        """Get status of a queued task."""
+        for status in self._task_history:
+            if status.task_id == task_id:
+                return status.to_dict()
+        return None
+
+    def get_recent_tasks(self, limit: int = 10) -> list:
+        """Get recent task statuses."""
+        return [t.to_dict() for t in self._task_history[-limit:]]
+
+    @property
+    def step_timeout(self) -> int:
+        """Get step timeout in seconds."""
+        return self._step_timeout
+
+    @step_timeout.setter
+    def step_timeout(self, value: int):
+        """Set step timeout in seconds."""
+        self._step_timeout = max(5, min(60, value))

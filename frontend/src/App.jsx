@@ -12,6 +12,8 @@ import CommandInput from './components/CommandInput';
 import ChatPanel from './components/ChatPanel';
 import SettingsPanel from './components/SettingsPanel';
 import DashboardPanel from './components/DashboardPanel';
+import DiagnosticsPanel from './components/DiagnosticsPanel';
+import NotificationToast, { showToast } from './components/NotificationToast';
 
 const pageAnim = { initial: { opacity: 0, y: 20 }, animate: { opacity: 1, y: 0 }, exit: { opacity: 0, y: -20 }, transition: { duration: 0.3 } };
 
@@ -54,14 +56,12 @@ function HomePage() {
 function speakWelcome() {
   const synth = window.speechSynthesis;
   if (!synth) return;
-  // Cancel any ongoing speech
   synth.cancel();
   const msg = new SpeechSynthesisUtterance("Welcome back Hari. All systems are operational. How may I assist you today?");
   msg.rate = 1.0;
   msg.pitch = 0.9;
   msg.volume = 1.0;
   msg.lang = 'en-US';
-  // Try to find a good male voice
   const voices = synth.getVoices();
   const preferred = voices.find(v => v.name.includes('Google US English') || v.name.includes('David') || v.name.includes('Male'));
   if (preferred) msg.voice = preferred;
@@ -84,15 +84,11 @@ async function speakWelcomeBackend() {
       const blob = new Blob([bytes], { type: 'audio/mp3' });
       const url = URL.createObjectURL(blob);
       const audio = new Audio(url);
-      audio.play().catch(() => {
-        // If backend TTS fails to play, use browser TTS
-        speakWelcome();
-      });
+      audio.play().catch(() => speakWelcome());
       audio.onended = () => URL.revokeObjectURL(url);
       return;
     }
   } catch (e) {}
-  // Fallback to browser TTS
   speakWelcome();
 }
 
@@ -124,6 +120,13 @@ function autoStartVoice() {
       const lower = cmd.toLowerCase();
       console.log('🗣️ Heard:', cmd);
 
+      // Check for deactivation commands
+      if (/^(turn off|go to sleep|jarvis stop|stop listening|deactivate|good\s*night)$/i.test(lower.replace(/hey\s+jarvis\s*/gi, '').trim())) {
+        useStore.getState().setAiState('idle');
+        showToast({ title: 'J.A.R.V.I.S', message: 'Going offline Hari. Call me anytime.', type: 'info' });
+        return;
+      }
+
       if (lower.includes('jarvis')) {
         const cleaned = lower.replace(/hey\s+jarvis|jarvis/gi, '').replace(/^\s*[,.\s]+/, '').trim();
         useStore.getState().setAiState('thinking');
@@ -142,7 +145,6 @@ function autoStartVoice() {
   };
 
   rec.onend = () => {
-    // Always restart
     setTimeout(() => {
       try { rec.start(); } catch (e) {
         setTimeout(() => { try { rec.start(); } catch (e2) {} }, 1000);
@@ -168,13 +170,7 @@ export default function App() {
 
   const onBootComplete = useCallback(() => {
     setShowBoot(false);
-
-    // Auto-speak welcome message after boot
-    setTimeout(() => {
-      speakWelcomeBackend();
-    }, 500);
-
-    // Auto-start voice recognition after welcome
+    setTimeout(() => speakWelcomeBackend(), 500);
     setTimeout(() => {
       if (!voiceRef.current) {
         voiceRef.current = autoStartVoice();
@@ -183,18 +179,15 @@ export default function App() {
   }, [setShowBoot]);
 
   useEffect(() => {
-    // Connect WebSocket and fetch status + profiles
     const t = setTimeout(() => {
       connectWs();
       fetchStatus();
       useStore.getState().fetchProfiles();
-      // Apply saved theme
       const saved = localStorage.getItem('jarvis-theme') || 'dark';
       document.documentElement.setAttribute('data-theme', saved);
     }, 500);
     const interval = setInterval(fetchStatus, 8000);
 
-    // Load voices for browser TTS
     if (window.speechSynthesis) {
       window.speechSynthesis.getVoices();
     }
@@ -214,6 +207,7 @@ export default function App() {
       case 'system': case 'commands': return <motion.div {...pageAnim} style={{ flex: 1, overflow: 'auto' }}><div className="panel" style={{ height: '100%' }}><DashboardPanel /></div></motion.div>;
       case 'chat': return <motion.div {...pageAnim} style={{ flex: 1 }}><div className="panel" style={{ height: '100%', display: 'flex', flexDirection: 'column' }}><ChatPanel /></div></motion.div>;
       case 'settings': case 'config': return <motion.div {...pageAnim} style={{ flex: 1, overflow: 'auto' }}><div className="panel"><div className="panel-title"><span className="panel-title-dot" />SETTINGS</div><SettingsPanel /></div></motion.div>;
+      case 'diagnostics': return <motion.div {...pageAnim} style={{ flex: 1, overflow: 'auto' }}><div className="panel"><DiagnosticsPanel /></div></motion.div>;
       default: return <motion.div {...pageAnim} style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><div style={{ textAlign: 'center', color: 'var(--text-dim)' }}><div style={{ fontSize: 48, marginBottom: 16 }}>🚀</div><div style={{ fontFamily: 'var(--font-display)', fontSize: 14, letterSpacing: 3 }}>{currentPage.toUpperCase()} MODULE</div><div style={{ fontSize: 12, marginTop: 8 }}>Coming soon</div></div></motion.div>;
     }
   };
@@ -221,6 +215,7 @@ export default function App() {
   return (
     <>
       {showBoot && <BootSequence onComplete={onBootComplete} />}
+      <NotificationToast />
       <TitleBar />
       <div className="app-layout">
         <Sidebar currentPage={currentPage} onNavigate={setPage} />

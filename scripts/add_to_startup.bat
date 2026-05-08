@@ -1,31 +1,30 @@
 @echo off
-echo =============================================
-echo   J.A.R.V.I.S - Auto Start Setup
-echo =============================================
-echo.
-echo This will make J.A.R.V.I.S start automatically
-echo when you turn on your PC.
+echo ============================================
+echo   J.A.R.V.I.S — Add to Windows Startup
+echo   Uses Task Scheduler with 15-second delay
+echo ============================================
 echo.
 
-:: Create a shortcut in the Windows Startup folder
-set STARTUP_FOLDER=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup
-set SHORTCUT_PATH=%STARTUP_FOLDER%\JARVIS.lnk
-set TARGET_PATH=%~dp0JARVIS.bat
-set ICON_PATH=%~dp0frontend\public\icon.ico
+:: Determine project root dynamically
+set "PROJECT_DIR=%~dp0.."
 
-:: Use PowerShell to create shortcut
-powershell -Command "$ws = New-Object -ComObject WScript.Shell; $s = $ws.CreateShortcut('%SHORTCUT_PATH%'); $s.TargetPath = '%TARGET_PATH%'; $s.WorkingDirectory = '%~dp0'; $s.Description = 'J.A.R.V.I.S AI Desktop Assistant'; $s.WindowStyle = 7; $s.Save()"
+:: Create the scheduled task
+echo Creating scheduled task with 15-second logon delay...
+schtasks /Create /F /TN "JARVIS_Startup" /TR "\"%PROJECT_DIR%\JARVIS.bat\"" /SC ONLOGON /DELAY 0000:15 /RL HIGHEST
 
-if exist "%SHORTCUT_PATH%" (
+if %ERRORLEVEL% EQU 0 (
     echo.
-    echo SUCCESS! J.A.R.V.I.S will now auto-start with Windows.
-    echo Shortcut created at: %SHORTCUT_PATH%
+    echo ✓ J.A.R.V.I.S added to Windows startup successfully!
+    echo   Task Name: JARVIS_Startup
+    echo   Trigger: On user logon
+    echo   Delay: 15 seconds after login
+    echo   Priority: Highest
+    echo.
+    echo To remove: Run scripts\remove_from_startup.bat
 ) else (
     echo.
-    echo Failed to create startup shortcut.
-    echo You can manually copy JARVIS.bat to:
-    echo %STARTUP_FOLDER%
+    echo ✗ Failed to create scheduled task.
+    echo   Try running this script as Administrator.
 )
-
 echo.
 pause

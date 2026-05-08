@@ -1,115 +1,252 @@
 """
-J.A.R.V.I.S Windows Service Launcher
-Starts the backend server silently in the background.
-Run this script at Windows startup to auto-launch J.A.R.V.I.S.
+J.A.R.V.I.S Pre-Launch Validator & Launcher
+Checks Python version, .env keys, port availability, mic detection, and dependencies
+before starting the backend and frontend servers.
 """
 
-import subprocess
-import sys
 import os
+import sys
+import socket
+import subprocess
 import time
-import signal
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent
-BACKEND_DIR = BASE_DIR / "backend"
-FRONTEND_DIR = BASE_DIR / "frontend"
-LOG_FILE = BACKEND_DIR / "logs" / "launcher.log"
+PROJECT_ROOT = Path(__file__).resolve().parent
+BACKEND_DIR = PROJECT_ROOT / "backend"
+FRONTEND_DIR = PROJECT_ROOT / "frontend"
+ENV_FILE = PROJECT_ROOT / ".env"
 
-# Ensure log directory exists
-LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-
-
-def log(msg):
-    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    line = f"[{timestamp}] {msg}"
-    print(line)
-    with open(LOG_FILE, "a") as f:
-        f.write(line + "\n")
+RED = "\033[91m"
+GREEN = "\033[92m"
+YELLOW = "\033[93m"
+CYAN = "\033[96m"
+RESET = "\033[0m"
+BOLD = "\033[1m"
 
 
-def start_backend():
-    """Start the FastAPI backend server."""
-    log("Starting J.A.R.V.I.S backend...")
-    python_exe = sys.executable
-    return subprocess.Popen(
-        [python_exe, "main.py"],
+def banner():
+    print(f"""
+{CYAN}╔══════════════════════════════════════════════════╗
+║        J.A.R.V.I.S v2.5 — Pre-Launch Check       ║
+║     Just A Rather Very Intelligent System         ║
+╚══════════════════════════════════════════════════╝{RESET}
+""")
+
+
+def check_python_version() -> bool:
+    """Ensure Python 3.10+ is installed."""
+    ver = sys.version_info
+    if ver.major >= 3 and ver.minor >= 10:
+        print(f"  {GREEN}✓{RESET} Python {ver.major}.{ver.minor}.{ver.micro}")
+        return True
+    else:
+        print(f"  {RED}✗{RESET} Python {ver.major}.{ver.minor} (need 3.10+)")
+        return False
+
+
+def check_env_file() -> bool:
+    """Check .env file exists and has valid API keys."""
+    if not ENV_FILE.exists():
+        print(f"  {RED}✗{RESET} .env file not found at {ENV_FILE}")
+        return False
+
+    print(f"  {GREEN}✓{RESET} .env file found")
+
+    # Check for at least one valid API key
+    placeholders = {"your_key_here", "changeme", "xxx", "todo", ""}
+    has_key = False
+    with open(ENV_FILE, "r") as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            key = key.strip()
+            val = val.strip().strip('"').strip("'")
+
+            if key in ("GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+                if val.lower() not in placeholders:
+                    has_key = True
+                    print(f"  {GREEN}✓{RESET} {key} configured")
+
+    if not has_key:
+        print(f"  {YELLOW}⚠{RESET} No AI API key configured (only Ollama/local models available)")
+
+    return True
+
+
+def check_port_available(port: int = 8765) -> bool:
+    """Check if the backend port is available."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(1)
+            result = s.connect_ex(("127.0.0.1", port))
+            if result == 0:
+                print(f"  {YELLOW}⚠{RESET} Port {port} already in use (backend may already be running)")
+                return True  # Not fatal, might be a previous instance
+            else:
+                print(f"  {GREEN}✓{RESET} Port {port} available")
+                return True
+    except Exception as e:
+        print(f"  {YELLOW}⚠{RESET} Port check failed: {e}")
+        return True
+
+
+def check_mic() -> bool:
+    """Check if a microphone is available."""
+    try:
+        import sounddevice as sd
+        devices = sd.query_devices()
+        input_devices = [d for d in devices if d.get("max_input_channels", 0) > 0]
+        if input_devices:
+            default = sd.default.device[0]
+            name = devices[default]["name"] if default is not None and default >= 0 else input_devices[0]["name"]
+            print(f"  {GREEN}✓{RESET} Microphone: {name}")
+            return True
+        else:
+            print(f"  {YELLOW}⚠{RESET} No microphone detected (voice control will be limited)")
+            return True  # Not fatal
+    except ImportError:
+        print(f"  {YELLOW}⚠{RESET} sounddevice not installed (mic detection unavailable)")
+        return True
+    except Exception as e:
+        print(f"  {YELLOW}⚠{RESET} Mic check failed: {e}")
+        return True
+
+
+def check_node() -> bool:
+    """Check Node.js is available."""
+    try:
+        result = subprocess.run(["node", "--version"], capture_output=True, text=True, timeout=5)
+        if result.returncode == 0:
+            ver = result.stdout.strip()
+            print(f"  {GREEN}✓{RESET} Node.js {ver}")
+            return True
+    except Exception:
+        pass
+    print(f"  {RED}✗{RESET} Node.js not found (needed for frontend)")
+    return False
+
+
+def check_npm_installed() -> bool:
+    """Check if frontend npm packages are installed."""
+    node_modules = FRONTEND_DIR / "node_modules"
+    if node_modules.exists():
+        print(f"  {GREEN}✓{RESET} Frontend dependencies installed")
+        return True
+    else:
+        print(f"  {YELLOW}⚠{RESET} Frontend node_modules not found — running 'npm install'...")
+        try:
+            subprocess.run(["npm", "install"], cwd=str(FRONTEND_DIR), timeout=120)
+            return True
+        except Exception as e:
+            print(f"  {RED}✗{RESET} npm install failed: {e}")
+            return False
+
+
+def check_backend_deps() -> bool:
+    """Check critical Python packages."""
+    required = ["fastapi", "uvicorn", "pydantic", "loguru", "psutil"]
+    missing = []
+    for pkg in required:
+        try:
+            __import__(pkg)
+        except ImportError:
+            missing.append(pkg)
+
+    if missing:
+        print(f"  {RED}✗{RESET} Missing packages: {', '.join(missing)}")
+        print(f"      Run: pip install -r backend/requirements.txt")
+        return False
+    else:
+        print(f"  {GREEN}✓{RESET} All required Python packages installed")
+        return True
+
+
+def launch():
+    """Launch backend and frontend."""
+    print(f"\n{CYAN}{'='*50}")
+    print(f"  Launching J.A.R.V.I.S...")
+    print(f"{'='*50}{RESET}\n")
+
+    # Start backend
+    print(f"  Starting backend server...")
+    backend_proc = subprocess.Popen(
+        [sys.executable, "main.py"],
         cwd=str(BACKEND_DIR),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
     )
 
+    # Wait for backend to start
+    time.sleep(3)
 
-def start_frontend():
-    """Start the Vite dev server for the frontend."""
-    log("Starting J.A.R.V.I.S frontend...")
-    npm_cmd = "npm.cmd" if os.name == "nt" else "npm"
-    return subprocess.Popen(
-        [npm_cmd, "run", "dev"],
+    # Start frontend
+    print(f"  Starting frontend...")
+    frontend_proc = subprocess.Popen(
+        ["npm", "run", "dev"],
         cwd=str(FRONTEND_DIR),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        shell=True,
     )
 
+    time.sleep(2)
 
-def start_electron():
-    """Start the Electron desktop app after frontend is ready."""
-    log("Starting J.A.R.V.I.S Electron app...")
-    time.sleep(4)  # Wait for Vite to be ready
-    npx_cmd = "npx.cmd" if os.name == "nt" else "npx"
-    return subprocess.Popen(
-        [npx_cmd, "electron", "."],
-        cwd=str(FRONTEND_DIR),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env={**os.environ, "NODE_ENV": "development"},
-    )
+    print(f"""
+{GREEN}{'='*50}
+  J.A.R.V.I.S is running!
+{'='*50}{RESET}
+
+  Backend:  {CYAN}http://127.0.0.1:8765{RESET}
+  Frontend: {CYAN}http://localhost:5173{RESET}
+  API Docs: {CYAN}http://127.0.0.1:8765/docs{RESET}
+
+  Voice:    Say "Hey JARVIS" or "JARVIS" + command
+  Clap:     Single clap to activate
+
+  Press Ctrl+C to stop.
+""")
+
+    try:
+        backend_proc.wait()
+    except KeyboardInterrupt:
+        print(f"\n{YELLOW}Stopping J.A.R.V.I.S...{RESET}")
+        backend_proc.terminate()
+        frontend_proc.terminate()
+        print(f"{GREEN}Goodbye!{RESET}")
 
 
 def main():
-    log("=" * 50)
-    log("J.A.R.V.I.S SYSTEM LAUNCHER")
-    log("=" * 50)
+    banner()
 
-    processes = []
+    print(f"{BOLD}Pre-Launch Checks:{RESET}")
+    print()
 
-    try:
-        backend_proc = start_backend()
-        processes.append(("Backend", backend_proc))
-        time.sleep(2)
+    checks = [
+        ("Python Version", check_python_version),
+        ("Environment File", check_env_file),
+        ("Backend Port", check_port_available),
+        ("Microphone", check_mic),
+        ("Node.js", check_node),
+        ("Python Packages", check_backend_deps),
+        ("Frontend Deps", check_npm_installed),
+    ]
 
-        frontend_proc = start_frontend()
-        processes.append(("Frontend", frontend_proc))
+    all_ok = True
+    for name, fn in checks:
+        try:
+            result = fn()
+            if not result:
+                all_ok = False
+        except Exception as e:
+            print(f"  {RED}✗{RESET} {name} check failed: {e}")
+            all_ok = False
 
-        electron_proc = start_electron()
-        processes.append(("Electron", electron_proc))
+    print()
 
-        log("All systems launched successfully!")
-        log("Backend:  http://127.0.0.1:8765")
-        log("Frontend: http://localhost:5173")
+    if not all_ok:
+        print(f"{RED}Some checks failed. Please fix the issues above and try again.{RESET}")
+        sys.exit(1)
 
-        # Keep running until Electron closes
-        electron_proc.wait()
-        log("Electron closed. Shutting down...")
-
-    except KeyboardInterrupt:
-        log("Shutdown requested...")
-    except Exception as e:
-        log(f"Launch error: {e}")
-    finally:
-        for name, proc in processes:
-            try:
-                proc.terminate()
-                proc.wait(timeout=5)
-                log(f"{name} stopped.")
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-        log("J.A.R.V.I.S shutdown complete.")
+    print(f"{GREEN}All checks passed!{RESET}")
+    launch()
 
 
 if __name__ == "__main__":

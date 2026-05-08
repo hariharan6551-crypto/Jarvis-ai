@@ -1,9 +1,11 @@
 """
 J.A.R.V.I.S AI Provider Manager
 Supports OpenAI, Anthropic Claude, Google Gemini, and Ollama.
+Features: retry with exponential backoff, auto-fallback, health pings.
 """
 
 import asyncio
+import time
 from typing import AsyncGenerator, Optional
 from core.logger import get_logger
 from config.settings import settings
@@ -12,54 +14,214 @@ log = get_logger("ai")
 
 
 class AIProvider:
-    """Manages multiple AI providers with fallback support."""
+    """Manages multiple AI providers with fallback support and retry logic."""
+
+    # Placeholder values that indicate an unconfigured key
+    _PLACEHOLDER_KEYS = {"your_key_here", "your-key-here", "changeme", "xxx", "todo", "sk-xxx", ""}
 
     def __init__(self):
         self.providers = {}
+        self._consecutive_failures = {}
+        self._last_health_check = {}
+        self._health_status = {}
+        self._fallback_active = False
+        self._primary_provider = settings.DEFAULT_AI_PROVIDER
+        self._health_check_interval = 60  # seconds
+        self._max_consecutive_failures = 3
         self._init_providers()
         log.info(f"AI Provider initialized with default: {settings.DEFAULT_AI_PROVIDER}")
+
+    def _is_valid_key(self, key: str) -> bool:
+        """Check if an API key is valid (not a placeholder)."""
+        if not key:
+            return False
+        return key.strip().lower() not in self._PLACEHOLDER_KEYS
 
     def _init_providers(self):
         """Initialize available AI providers."""
         # OpenAI
-        if settings.OPENAI_API_KEY:
+        if settings.OPENAI_API_KEY and self._is_valid_key(settings.OPENAI_API_KEY):
             try:
                 from openai import AsyncOpenAI
                 self.providers["openai"] = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+                self._consecutive_failures["openai"] = 0
+                self._health_status["openai"] = "ok"
                 log.info("OpenAI provider ready")
             except Exception as e:
                 log.warning(f"OpenAI init failed: {e}")
+                self._health_status["openai"] = "failed"
+        elif settings.OPENAI_API_KEY:
+            log.warning("OpenAI API key is a placeholder — skipping")
 
         # Anthropic
-        if settings.ANTHROPIC_API_KEY:
+        if settings.ANTHROPIC_API_KEY and self._is_valid_key(settings.ANTHROPIC_API_KEY):
             try:
                 from anthropic import AsyncAnthropic
                 self.providers["anthropic"] = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+                self._consecutive_failures["anthropic"] = 0
+                self._health_status["anthropic"] = "ok"
                 log.info("Anthropic provider ready")
             except Exception as e:
                 log.warning(f"Anthropic init failed: {e}")
+                self._health_status["anthropic"] = "failed"
+        elif settings.ANTHROPIC_API_KEY:
+            log.warning("Anthropic API key is a placeholder — skipping")
 
         # Gemini
-        if settings.GEMINI_API_KEY:
+        if settings.GEMINI_API_KEY and self._is_valid_key(settings.GEMINI_API_KEY):
             try:
                 import google.generativeai as genai
                 genai.configure(api_key=settings.GEMINI_API_KEY)
                 self.providers["gemini"] = genai
+                self._consecutive_failures["gemini"] = 0
+                self._health_status["gemini"] = "ok"
                 log.info("Gemini provider ready")
             except Exception as e:
                 log.warning(f"Gemini init failed: {e}")
+                self._health_status["gemini"] = "failed"
+        elif settings.GEMINI_API_KEY:
+            log.warning("Gemini API key is a placeholder ('your_key_here') — skipping. Please set a real key in .env")
 
         # Ollama (local, always available)
         try:
             import ollama
             self.providers["ollama"] = ollama
+            self._consecutive_failures["ollama"] = 0
+            self._health_status["ollama"] = "ok"
             log.info("Ollama provider ready")
         except Exception as e:
             log.debug(f"Ollama not available: {e}")
+            self._health_status["ollama"] = "failed"
 
     def get_available_providers(self) -> list:
         """Return list of available provider names."""
         return list(self.providers.keys())
+
+    def get_health_status(self) -> dict:
+        """Return health status of all providers."""
+        return {
+            name: {
+                "status": self._health_status.get(name, "unknown"),
+                "failures": self._consecutive_failures.get(name, 0),
+                "available": name in self.providers,
+            }
+            for name in ["openai", "anthropic", "gemini", "ollama"]
+        }
+
+    # ─── Retry Logic ──────────────────────────────────────────────────
+
+    async def _retry_with_backoff(self, provider: str, func, *args, **kwargs):
+        """
+        Retry logic: 3 attempts, exponential backoff (1s → 2s → 4s).
+        Logs every failure with timestamp + error + attempt number.
+        """
+        max_retries = 3
+        base_delay = 1.0
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                result = await func(*args, **kwargs)
+                # Reset failure counter on success
+                self._consecutive_failures[provider] = 0
+                self._health_status[provider] = "ok"
+                return result
+            except Exception as e:
+                delay = base_delay * (2 ** (attempt - 1))  # 1s, 2s, 4s
+                log.error(
+                    f"AI provider '{provider}' attempt {attempt}/{max_retries} failed: {e} "
+                    f"(timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')})"
+                )
+
+                self._consecutive_failures[provider] = self._consecutive_failures.get(provider, 0) + 1
+
+                if attempt < max_retries:
+                    log.info(f"Retrying in {delay}s...")
+                    await asyncio.sleep(delay)
+                else:
+                    # All retries exhausted
+                    self._health_status[provider] = "degraded"
+
+                    # Check if we should auto-switch to fallback
+                    if self._consecutive_failures.get(provider, 0) >= self._max_consecutive_failures:
+                        self._health_status[provider] = "failed"
+                        log.warning(
+                            f"Provider '{provider}' failed {self._max_consecutive_failures} "
+                            f"consecutive times — switching to fallback"
+                        )
+                    raise
+
+    # ─── Auto-Fallback ────────────────────────────────────────────────
+
+    def _get_fallback_provider(self, failed_provider: str) -> Optional[str]:
+        """Get the next available fallback provider."""
+        # Priority order for fallback
+        fallback_order = ["gemini", "openai", "anthropic", "ollama"]
+
+        for name in fallback_order:
+            if (
+                name != failed_provider
+                and name in self.providers
+                and self._health_status.get(name) != "failed"
+            ):
+                log.info(f"Falling back to provider: {name}")
+                return name
+        return None
+
+    # ─── Health Check ─────────────────────────────────────────────────
+
+    async def health_check(self):
+        """Ping all providers to check health. Run every 60 seconds."""
+        while True:
+            for name in list(self.providers.keys()):
+                try:
+                    now = time.time()
+                    last_check = self._last_health_check.get(name, 0)
+                    if now - last_check < self._health_check_interval:
+                        continue
+
+                    self._last_health_check[name] = now
+
+                    if name == "openai":
+                        client = self.providers["openai"]
+                        await asyncio.wait_for(
+                            client.models.list(),
+                            timeout=10
+                        )
+                        self._health_status[name] = "ok"
+                        self._consecutive_failures[name] = 0
+
+                    elif name == "gemini":
+                        genai = self.providers["gemini"]
+                        await asyncio.to_thread(
+                            lambda: genai.list_models()
+                        )
+                        self._health_status[name] = "ok"
+                        self._consecutive_failures[name] = 0
+
+                    elif name == "ollama":
+                        import ollama as ollama_lib
+                        await asyncio.to_thread(ollama_lib.list)
+                        self._health_status[name] = "ok"
+                        self._consecutive_failures[name] = 0
+
+                    elif name == "anthropic":
+                        # Anthropic doesn't have a simple list endpoint,
+                        # just mark as ok if init succeeded
+                        if name in self.providers:
+                            self._health_status[name] = "ok"
+
+                    log.debug(f"Health check passed: {name}")
+
+                except asyncio.TimeoutError:
+                    self._health_status[name] = "degraded"
+                    log.warning(f"Health check timeout: {name}")
+                except Exception as e:
+                    self._health_status[name] = "degraded"
+                    log.warning(f"Health check failed for {name}: {e}")
+
+            await asyncio.sleep(self._health_check_interval)
+
+    # ─── Chat (with retry + fallback) ─────────────────────────────────
 
     async def chat(
         self,
@@ -69,31 +231,56 @@ class AIProvider:
         model: str = None,
         history: list = None,
     ) -> str:
-        """Send a chat message and get a complete response."""
+        """Send a chat message and get a complete response. Includes retry + auto-fallback."""
         provider = provider or settings.DEFAULT_AI_PROVIDER
         model = model or settings.DEFAULT_AI_MODEL
 
-        if provider not in self.providers:
-            available = self.get_available_providers()
-            if available:
-                provider = available[0]
-                log.warning(f"Requested provider unavailable, falling back to {provider}")
+        # If requested provider unavailable or failed, find fallback
+        if provider not in self.providers or self._health_status.get(provider) == "failed":
+            fallback = self._get_fallback_provider(provider)
+            if fallback:
+                log.warning(f"Provider '{provider}' unavailable, using fallback: {fallback}")
+                provider = fallback
+            elif self.providers:
+                provider = list(self.providers.keys())[0]
+                log.warning(f"Using first available provider: {provider}")
             else:
                 return "I apologize, but no AI providers are currently configured. Please add an API key in the settings."
 
         try:
-            if provider == "openai":
-                return await self._chat_openai(message, system_prompt, model, history)
-            elif provider == "anthropic":
-                return await self._chat_anthropic(message, system_prompt, model, history)
-            elif provider == "gemini":
-                return await self._chat_gemini(message, system_prompt, model, history)
-            elif provider == "ollama":
-                return await self._chat_ollama(message, system_prompt, model, history)
-            else:
-                return f"Unknown provider: {provider}"
+            async def _do_chat():
+                if provider == "openai":
+                    return await self._chat_openai(message, system_prompt, model, history)
+                elif provider == "anthropic":
+                    return await self._chat_anthropic(message, system_prompt, model, history)
+                elif provider == "gemini":
+                    return await self._chat_gemini(message, system_prompt, model, history)
+                elif provider == "ollama":
+                    return await self._chat_ollama(message, system_prompt, model, history)
+                else:
+                    return f"Unknown provider: {provider}"
+
+            return await self._retry_with_backoff(provider, _do_chat)
+
         except Exception as e:
-            log.error(f"AI chat error ({provider}): {e}")
+            log.error(f"All retries failed for {provider}: {e}")
+
+            # Try fallback provider
+            fallback = self._get_fallback_provider(provider)
+            if fallback:
+                log.info(f"Attempting fallback to {fallback}")
+                try:
+                    if fallback == "openai":
+                        return await self._chat_openai(message, system_prompt, None, history)
+                    elif fallback == "anthropic":
+                        return await self._chat_anthropic(message, system_prompt, None, history)
+                    elif fallback == "gemini":
+                        return await self._chat_gemini(message, system_prompt, None, history)
+                    elif fallback == "ollama":
+                        return await self._chat_ollama(message, system_prompt, None, history)
+                except Exception as e2:
+                    log.error(f"Fallback provider {fallback} also failed: {e2}")
+
             return f"I encountered an error processing your request: {str(e)}"
 
     async def chat_stream(
@@ -131,6 +318,7 @@ class AIProvider:
                     yield token
         except Exception as e:
             log.error(f"AI stream error ({provider}): {e}")
+            self._consecutive_failures[provider] = self._consecutive_failures.get(provider, 0) + 1
             yield f"Error: {str(e)}"
 
     # ─── OpenAI ───────────────────────────────────────────────────────
