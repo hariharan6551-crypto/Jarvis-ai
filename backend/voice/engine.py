@@ -398,9 +398,9 @@ class VoiceEngine:
             sample_rate = 44100
             block_size = 2048
             # Adaptive threshold - will be calibrated
-            clap_threshold = 0.35
+            clap_threshold = 0.15
             clap_cooldown = 0.25       # Min time between claps (seconds)
-            multi_clap_window = 0.65   # Window to detect multiple claps
+            multi_clap_window = 0.85   # Window to detect multiple claps
 
             clap_times = []
             # Track ambient noise for adaptive threshold
@@ -415,7 +415,7 @@ class VoiceEngine:
                     amplitude = np.abs(indata).max()
 
                     # Update noise floor (rolling average of quiet samples)
-                    if amplitude < 0.15:
+                    if amplitude < 0.10:
                         noise_samples.append(amplitude)
                         if len(noise_samples) > 200:
                             noise_samples.pop(0)
@@ -423,7 +423,7 @@ class VoiceEngine:
                             noise_floor = np.mean(noise_samples) * 1.5
 
                     # Adaptive threshold: must be well above noise floor
-                    adaptive_thresh = max(clap_threshold, noise_floor * 4)
+                    adaptive_thresh = max(clap_threshold, noise_floor * 3.0)
 
                     if amplitude > adaptive_thresh:
                         now = time.time()

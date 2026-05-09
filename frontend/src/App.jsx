@@ -130,17 +130,17 @@ function startVoiceRecognition() {
 
         // ━━━ WAKE WORD: "JARVIS" ━━━
         // Check if any variant of "jarvis" is spoken
-        const hasWakeWord = /jarvis/i.test(lower);
+        const hasWakeWord = /jarvis|j\.?a\.?r\.?v\.?i\.?s\.?/i.test(lower);
 
         if (hasWakeWord) {
           const store = useStore.getState();
 
           // Count how many times "jarvis" appears (urgent call)
-          const jarvisCount = (lower.match(/jarvis/gi) || []).length;
+          const jarvisCount = (lower.match(/jarvis|j\.?a\.?r\.?v\.?i\.?s\.?/gi) || []).length;
 
           // Extract command after the wake word
           const cleaned = lower
-            .replace(/hey\s+jarvis|jarvis/gi, '')
+            .replace(/hey\s+(jarvis|j\.?a\.?r\.?v\.?i\.?s\.?)|(jarvis|j\.?a\.?r\.?v\.?i\.?s\.?)/gi, '')
             .replace(/^\s*[,.\s]+/, '')
             .trim();
 
