@@ -63,25 +63,24 @@ connected_clients: list[WebSocket] = []
 
 async def broadcast_to_clients(message: dict):
     """Broadcast a dict message to all connected WebSocket clients."""
-    count = len(connected_clients)
-    log.info(f"Broadcasting to {count} WebSocket clients: {message.get('type', 'unknown')}")
     if not connected_clients:
-        log.warning("No WebSocket clients connected - broadcast skipped")
         return
     text = json.dumps(message)
+    msg_type = message.get('type', 'unknown')
     stale = []
     for ws in connected_clients:
         try:
             await ws.send_text(text)
-            log.info(f"Sent {message.get('type','')} event to client")
         except Exception as e:
-            log.error(f"Failed to send to client: {e}")
+            log.error(f"Failed to send {msg_type} to client: {e}")
             stale.append(ws)
     for ws in stale:
         try:
             connected_clients.remove(ws)
         except ValueError:
             pass
+    if msg_type != 'status':  # Don't log routine stats broadcasts
+        log.info(f"Broadcast {msg_type} to {len(connected_clients)} client(s)")
 
 
 # ── Request Models ────────────────────────────────────────────────────
@@ -270,8 +269,6 @@ async def websocket_endpoint(ws: WebSocket):
     connected_clients.append(ws)
     log.info(f"WebSocket client connected ({len(connected_clients)} total)")
 
-    log.info(f"WebSocket client connected ({len(connected_clients)} total)")
-
     await send_ws(ws, "connected", {
         "message": f"Hello {settings.USER_NAME}, J.A.R.V.I.S is online.",
         "version": settings.APP_VERSION,
@@ -309,17 +306,7 @@ async def websocket_endpoint(ws: WebSocket):
 
                     response_text = result.get("ai_response", result.get("message", ""))
 
-                    # Generate TTS audio
-                    audio_b64 = None
-                    if voice_engine and response_text:
-                        try:
-                            await send_ws(ws, "state_change", {"state": "speaking"})
-                            audio_bytes = await voice_engine.speak(response_text)
-                            if audio_bytes:
-                                audio_b64 = base64.b64encode(audio_bytes).decode()
-                        except Exception as e:
-                            log.error(f"TTS failed: {e}")
-
+                    # Send response text IMMEDIATELY for fast feedback
                     await send_ws(ws, "response", {
                         "success": result.get("success", True),
                         "response_text": response_text,
@@ -327,8 +314,19 @@ async def websocket_endpoint(ws: WebSocket):
                         "intent": result.get("intent", ""),
                         "duration_ms": result.get("duration_ms", 0),
                         "plan_steps": result.get("plan_steps", 1),
-                        "audio": audio_b64,
+                        "audio": None,  # Audio comes separately for speed
                     })
+
+                    # Generate TTS audio in background and send as follow-up
+                    if voice_engine and response_text:
+                        try:
+                            await send_ws(ws, "state_change", {"state": "speaking"})
+                            audio_bytes = await voice_engine.speak(response_text)
+                            if audio_bytes:
+                                audio_b64 = base64.b64encode(audio_bytes).decode()
+                                await send_ws(ws, "tts_audio", {"audio": audio_b64})
+                        except Exception as e:
+                            log.error(f"TTS failed: {e}")
 
                 except Exception as e:
                     log.error(f"Command execution error: {e}")
@@ -338,7 +336,9 @@ async def websocket_endpoint(ws: WebSocket):
                         "message": f"Error: {str(e)}",
                     })
 
-                await send_ws(ws, "state_change", {"state": "idle"})
+                await send_ws(ws, "state_change", {
+                    "state": "listening" if (voice_engine and voice_engine.jarvis_active) else "idle"
+                })
 
             elif msg_type == "ping":
                 await send_ws(ws, "pong", {"time": time.time()})

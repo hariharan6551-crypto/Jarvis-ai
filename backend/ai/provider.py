@@ -245,7 +245,7 @@ class AIProvider:
                 provider = list(self.providers.keys())[0]
                 log.warning(f"Using first available provider: {provider}")
             else:
-                return "I apologize, but no AI providers are currently configured. Please add an API key in the settings."
+                return "I apologize, but no AI providers are currently configured. Please add your GEMINI_API_KEY in the .env file."
 
         try:
             async def _do_chat():

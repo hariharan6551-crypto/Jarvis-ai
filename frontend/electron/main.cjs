@@ -77,6 +77,7 @@ function createWindow() {
       nodeIntegration: false,
       webSecurity: true,
       sandbox: false,
+      autoplayPolicy: 'no-user-gesture-required',
     },
     icon: path.join(__dirname, '../public/icon.png'),
     backgroundColor: '#0a0e1a',

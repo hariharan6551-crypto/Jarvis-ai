@@ -96,7 +96,7 @@ async function speakBackend(text) {
 }
 
 // ─── Voice Recognition (Web Speech API) ──────────────────────────
-// Handles wake word "JARVIS" detection from voice input.
+// Handles wake word "JARVIS" detection + active-mode command capture.
 // Clap detection is handled by the BACKEND via sounddevice.
 function startVoiceRecognition() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -107,86 +107,95 @@ function startVoiceRecognition() {
 
   const rec = new SR();
   rec.continuous = true;
-  rec.interimResults = false; // Only final results for reliability
+  rec.interimResults = true;
   rec.lang = 'en-US';
-  rec.maxAlternatives = 3;
+  rec.maxAlternatives = 1;
 
   rec.onstart = () => {
     useStore.getState().setRecording(true);
     console.log('🎤 Voice recognition active — say "JARVIS" to activate');
   };
 
+  // Track whether wake word was already triggered in the current speech phrase
+  let wakeWordTriggeredThisPhrase = false;
+
   rec.onresult = (event) => {
     for (let i = event.resultIndex; i < event.results.length; i++) {
-      if (!event.results[i].isFinal) continue;
+      const isFinal = event.results[i].isFinal;
+      const transcript = event.results[i][0].transcript.trim();
+      const lower = transcript.toLowerCase();
 
-      // Check all alternatives for better wake word detection
-      for (let alt = 0; alt < event.results[i].length; alt++) {
-        const transcript = event.results[i][alt].transcript.trim();
-        const lower = transcript.toLowerCase();
+      if (!lower) continue;
 
-        if (!lower) continue;
-        console.log('🗣️ Heard:', transcript);
+      if (isFinal) {
+        console.log('🗣️ Final:', transcript);
+      }
 
-        // ━━━ WAKE WORD: "JARVIS" ━━━
-        // Check if any variant of "jarvis" is spoken
-        const hasWakeWord = /jarvis|j\.?a\.?r\.?v\.?i\.?s\.?/i.test(lower);
+      const store = useStore.getState();
+      const hasWakeWord = /jarvis|j\.?a\.?r\.?v\.?i\.?s\.?/i.test(lower);
 
-        if (hasWakeWord) {
-          const store = useStore.getState();
+      // ━━━ 1. DEACTIVATION COMMANDS (always check first) ━━━
+      if (isFinal && /^(turn off|go to sleep|stop listening|deactivate|good\s*night|shut down|jarvis stop)$/i.test(lower)) {
+        store.setJarvisActive(false);
+        store.setAiState('idle');
+        wakeWordTriggeredThisPhrase = false;
+        showToast({ title: 'J.A.R.V.I.S', message: 'Going offline Hari. Call me anytime.', type: 'info' });
+        store.addChatMessage({ role: 'assistant', content: 'Going offline Hari. Call me anytime.' });
+        speakBackend('Going offline Hari. Call me anytime.');
+        return; // Done processing this batch
+      }
 
-          // Count how many times "jarvis" appears (urgent call)
-          const jarvisCount = (lower.match(/jarvis|j\.?a\.?r\.?v\.?i\.?s\.?/gi) || []).length;
+      // ━━━ 2. WAKE WORD DETECTION ━━━
+      if (hasWakeWord && !wakeWordTriggeredThisPhrase) {
+        wakeWordTriggeredThisPhrase = true;
+        store.setJarvisActive(true);
+        store.setAiState('listening');
+        console.log('🗣️ Wake word detected — JARVIS activated');
 
-          // Extract command after the wake word
-          const cleaned = lower
-            .replace(/hey\s+(jarvis|j\.?a\.?r\.?v\.?i\.?s\.?)|(jarvis|j\.?a\.?r\.?v\.?i\.?s\.?)/gi, '')
-            .replace(/^\s*[,.\s]+/, '')
-            .trim();
-
-          // Activate JARVIS
-          store.setJarvisActive(true);
-          store.setAiState('listening');
-
-          if (jarvisCount >= 2) {
-            // Multiple "JARVIS" calls = urgent
-            console.log('🚨 Urgent wake word ×' + jarvisCount);
-            showToast({ title: 'J.A.R.V.I.S', message: "Yes, I'm here. How can I help?", type: 'info' });
-            store.addChatMessage({ role: 'assistant', content: "Yes, I'm here. How can I help?" });
-            speakBackend("Yes, I'm here. How can I help?");
-          } else if (cleaned) {
-            // Wake word + command
-            showToast({ title: 'J.A.R.V.I.S', message: `Processing: "${cleaned}"`, type: 'info' });
-            store.sendCommand(cleaned);
-          } else {
-            // Just wake word, no command
-            showToast({ title: 'J.A.R.V.I.S', message: 'Hey Hari, how can I help you?', type: 'info' });
-            store.addChatMessage({ role: 'assistant', content: 'Hey Hari, how can I help you?' });
-            speakBackend('Hey Hari, how can I help you?');
-          }
-
-          // Found wake word in this alternative, stop checking others
-          break;
-        }
-
-        // ━━━ DEACTIVATION COMMANDS ━━━
-        if (/^(turn off|go to sleep|stop listening|deactivate|good\s*night|shut down)$/i.test(lower)) {
-          const store = useStore.getState();
-          store.setJarvisActive(false);
-          store.setAiState('idle');
-          showToast({ title: 'J.A.R.V.I.S', message: 'Going offline Hari. Call me anytime.', type: 'info' });
-          store.addChatMessage({ role: 'assistant', content: 'Going offline Hari. Call me anytime.' });
-          speakBackend('Going offline Hari. Call me anytime.');
-          break;
-        }
-
-        // If JARVIS is active and user speaks a command without wake word
-        if (useStore.getState().jarvisActive) {
-          const store = useStore.getState();
-          store.sendCommand(transcript);
-          break;
+        if (!isFinal) {
+          // Interim result: just activate UI, wait for the final sentence
+          continue;
         }
       }
+
+      // Only process final results from here
+      if (!isFinal) continue;
+
+      // ━━━ 3. WAKE WORD + COMMAND IN SAME PHRASE ━━━
+      if (wakeWordTriggeredThisPhrase) {
+        wakeWordTriggeredThisPhrase = false; // Reset for next phrase
+
+        // Extract command text after the wake word
+        const cleaned = lower
+          .replace(/hey\s+(jarvis|j\.?a\.?r\.?v\.?i\.?s\.?)|(jarvis|j\.?a\.?r\.?v\.?i\.?s\.?)/gi, '')
+          .replace(/^\s*[,.\s]+/, '')
+          .trim();
+
+        if (cleaned) {
+          // Wake word + command: "JARVIS open chrome"
+          console.log('🎯 Wake word + command:', cleaned);
+          showToast({ title: 'J.A.R.V.I.S', message: `Processing: "${cleaned}"`, type: 'info' });
+          store.sendCommand(cleaned);
+        } else {
+          // Just the wake word: "JARVIS" / "Hey JARVIS"
+          showToast({ title: 'J.A.R.V.I.S', message: 'Hey Hari, how can I help you?', type: 'info' });
+          store.addChatMessage({ role: 'assistant', content: 'Hey Hari, how can I help you?' });
+          speakBackend('Hey Hari, how can I help you?');
+        }
+        store._startAutoDeactivateTimer();
+        return; // Done processing this batch
+      }
+
+      // ━━━ 4. COMMAND WHILE JARVIS IS ALREADY ACTIVE (no wake word needed) ━━━
+      if (store.jarvisActive) {
+        console.log('🎯 Active mode command:', transcript);
+        showToast({ title: 'J.A.R.V.I.S', message: `Processing: "${transcript}"`, type: 'info' });
+        store.sendCommand(transcript);
+        store._startAutoDeactivateTimer();
+        return; // Done processing this batch
+      }
+
+      // If JARVIS is not active and no wake word, ignore the speech
     }
   };
 

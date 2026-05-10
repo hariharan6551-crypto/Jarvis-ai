@@ -30,6 +30,7 @@ const useStore = create((set, get) => ({
   isRecording: false,
   audioLevel: 0,
   waveformData: Array(32).fill(4),
+  _autoDeactivateTimer: null,
 
   // Theme
   theme: localStorage.getItem('jarvis-theme') || 'dark',
@@ -148,7 +149,9 @@ const useStore = create((set, get) => ({
     } else if (type === 'response') {
       const d = data.data;
       const responseText = d.response_text || d.message || '';
-      set({ aiState: 'idle', aiResponse: responseText });
+      // If JARVIS is active, stay in 'listening' state so it keeps accepting commands
+      const nextState = get().jarvisActive ? 'listening' : 'idle';
+      set({ aiState: nextState, aiResponse: responseText });
 
       if (responseText) {
         get().addChatMessage({ role: 'assistant', content: responseText });
@@ -164,6 +167,11 @@ const useStore = create((set, get) => ({
         get().playAudio(d.audio);
       }
 
+      // Reset auto-deactivate timer after response so user has time for follow-up
+      if (get().jarvisActive) {
+        get()._startAutoDeactivateTimer();
+      }
+
     } else if (type === 'transcription') {
       set({ transcription: data.data.text });
       get().addChatMessage({ role: 'user', content: data.data.text });
@@ -171,15 +179,24 @@ const useStore = create((set, get) => ({
     } else if (type === 'clap_event') {
       // ━━━ CLAP DETECTION FROM BACKEND ━━━
       const d = data.data;
+      const event = d.event;
       const isActive = d.jarvis_active;
       set({ jarvisActive: isActive });
 
-      if (isActive) {
+      if (event === 'triple_clap') {
+        // Triple clap → EMERGENCY STOP
+        console.log('👏👏👏 Triple clap → EMERGENCY STOP');
+        set({ aiState: 'idle', jarvisActive: false });
+        get().addChatMessage({ role: 'assistant', content: d.message || 'Emergency stop activated.' });
+        get().speakBackend(d.message || 'Emergency stop activated. All tasks halted.');
+      } else if (isActive) {
         // Single clap → JARVIS ON
         console.log('👏 Single clap → JARVIS ACTIVATED');
         set({ aiState: 'listening' });
         get().addChatMessage({ role: 'assistant', content: d.message || 'Hey Hari, how can I help you?' });
         get().speakBackend(d.message || 'Hey Hari, how can I help you?');
+        // Auto-deactivate after 30s of no commands
+        get()._startAutoDeactivateTimer();
       } else {
         // Double clap → JARVIS OFF
         console.log('👏👏 Double clap → JARVIS DEACTIVATED');
@@ -206,7 +223,25 @@ const useStore = create((set, get) => ({
       set({ chromeProfiles: data.data.profiles || [] });
     } else if (type === 'connected') {
       console.log('Server:', data.data.message);
+    } else if (type === 'tts_audio') {
+      // ━━━ SEPARATE TTS AUDIO (sent after response for speed) ━━━
+      if (data.data.audio) {
+        get().playAudio(data.data.audio);
+      }
     }
+  },
+
+  // Auto-deactivate after 2 minutes idle (gives plenty of time for follow-up commands)
+  _startAutoDeactivateTimer: () => {
+    const prev = get()._autoDeactivateTimer;
+    if (prev) clearTimeout(prev);
+    const timer = setTimeout(() => {
+      if (get().jarvisActive && get().aiState !== 'thinking' && get().aiState !== 'speaking') {
+        console.log('⏱️ Auto-deactivating JARVIS after 2min idle');
+        set({ jarvisActive: false, aiState: 'idle', _autoDeactivateTimer: null });
+      }
+    }, 120000);
+    set({ _autoDeactivateTimer: timer });
   },
 
   sendCommand: (text) => {
@@ -214,6 +249,9 @@ const useStore = create((set, get) => ({
     if (!text.trim()) return;
     get().addChatMessage({ role: 'user', content: text });
     set({ aiState: 'thinking', transcription: text });
+
+    // Reset auto-deactivate timer on each command
+    get()._startAutoDeactivateTimer();
 
     if (ws && connected) {
       ws.send(JSON.stringify({ type: 'command', text }));

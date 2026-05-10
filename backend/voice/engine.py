@@ -382,14 +382,15 @@ class VoiceEngine:
     async def start_clap_detector(self):
         """
         Background clap detection using audio amplitude spikes.
-        Single clap  → activate JARVIS (say "Hey Hari, how can I help you?")
-        Double clap  → deactivate JARVIS (turn off)
+        Single clap  → activate JARVIS
+        Double clap  → deactivate JARVIS
+        Triple clap  → emergency stop all tasks
         """
         if not self._mic_available:
             log.warning("Clap detection unavailable — no microphone")
             return
 
-        log.info("🎤 Starting clap detector (single=ON, double=OFF)...")
+        log.info("🎤 Starting clap detector (single=ON, double=OFF, triple=EMERGENCY)...")
 
         try:
             import sounddevice as sd
@@ -397,41 +398,44 @@ class VoiceEngine:
 
             sample_rate = 44100
             block_size = 2048
-            # Adaptive threshold - will be calibrated
-            clap_threshold = 0.15
-            clap_cooldown = 0.25       # Min time between claps (seconds)
-            multi_clap_window = 0.85   # Window to detect multiple claps
+            clap_threshold = 0.12
+            clap_cooldown = 0.20       # Min time between claps (seconds)
+            multi_clap_window = 0.90   # Window to detect multiple claps
 
             clap_times = []
-            # Track ambient noise for adaptive threshold
             noise_samples = []
-            noise_floor = 0.05
+            noise_floor = 0.03
+            calibrating = True
+            calibration_start = time.time()
 
             def _audio_callback(indata, frames, time_info, status):
-                nonlocal noise_floor
+                nonlocal noise_floor, calibrating
                 if status:
                     return
                 try:
                     amplitude = np.abs(indata).max()
 
                     # Update noise floor (rolling average of quiet samples)
-                    if amplitude < 0.10:
+                    if amplitude < 0.08:
                         noise_samples.append(amplitude)
-                        if len(noise_samples) > 200:
+                        if len(noise_samples) > 300:
                             noise_samples.pop(0)
-                        if len(noise_samples) > 20:
-                            noise_floor = np.mean(noise_samples) * 1.5
+                        if len(noise_samples) > 10:
+                            noise_floor = np.mean(noise_samples)
+
+                    # Skip during calibration period
+                    if calibrating:
+                        return
 
                     # Adaptive threshold: must be well above noise floor
-                    adaptive_thresh = max(clap_threshold, noise_floor * 3.0)
+                    adaptive_thresh = max(clap_threshold, noise_floor * 3.5)
 
                     if amplitude > adaptive_thresh:
                         now = time.time()
-                        # Cooldown check
                         if clap_times and (now - clap_times[-1]) < clap_cooldown:
                             return
                         clap_times.append(now)
-                        log.debug(f"Clap spike detected: amplitude={amplitude:.3f} threshold={adaptive_thresh:.3f}")
+                        log.debug(f"Clap spike: amp={amplitude:.3f} thresh={adaptive_thresh:.3f} floor={noise_floor:.3f}")
                 except Exception:
                     pass
 
@@ -444,21 +448,29 @@ class VoiceEngine:
             )
 
             with stream:
-                log.info("✓ Clap detector active and listening")
+                # Calibrate noise floor for 2 seconds
+                log.info("Calibrating ambient noise level...")
+                await asyncio.sleep(2)
+                calibrating = False
+                log.info(f"✓ Clap detector active (noise_floor={noise_floor:.3f}, threshold={max(clap_threshold, noise_floor * 3.5):.3f})")
+
                 while not self._shutdown:
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.08)
 
                     if not clap_times:
                         continue
 
                     now = time.time()
-                    # Check if multi-clap window has passed
                     if (now - clap_times[-1]) > multi_clap_window:
                         recent = [t for t in clap_times if (now - t) < (multi_clap_window + 0.5)]
                         clap_count = len(recent)
                         clap_times.clear()
 
-                        if clap_count >= 2:
+                        if clap_count >= 3:
+                            log.info("👏👏👏 Triple clap → EMERGENCY STOP")
+                            self.jarvis_active = False
+                            await self._broadcast_clap_event("triple_clap", "emergency")
+                        elif clap_count == 2:
                             log.info("👏👏 Double clap → Deactivate JARVIS")
                             self.jarvis_active = False
                             await self._broadcast_clap_event("double_clap", "off")
@@ -471,7 +483,6 @@ class VoiceEngine:
             log.warning("sounddevice not available for clap detection")
         except Exception as e:
             log.error(f"Clap detector error: {e}")
-            # Auto-restart after 3 seconds
             if not self._shutdown:
                 log.info("Restarting clap detector in 3s...")
                 await asyncio.sleep(3)
@@ -479,28 +490,29 @@ class VoiceEngine:
 
     async def _broadcast_clap_event(self, event_type: str, jarvis_state: str):
         """Broadcast clap event to all connected WebSocket clients."""
-        log.info(f"Attempting to broadcast clap event: {event_type}. broadcast_fn is set: {self.broadcast_fn is not None}")
         if self.broadcast_fn:
             try:
+                if jarvis_state == "on":
+                    message = f"Hey {settings.USER_NAME}, how can I help you?"
+                elif jarvis_state == "emergency":
+                    message = f"Emergency stop activated. All tasks halted, {settings.USER_NAME}."
+                else:
+                    message = f"Going offline {settings.USER_NAME}. Call me anytime."
+
                 payload = {
                     "type": "clap_event",
                     "data": {
                         "event": event_type,
                         "jarvis_active": jarvis_state == "on",
-                        "message": (
-                            f"Hey {settings.USER_NAME}, how can I help you?"
-                            if jarvis_state == "on"
-                            else f"Going offline {settings.USER_NAME}. Call me anytime."
-                        ),
+                        "message": message,
                     },
                 }
-                log.info(f"Sending payload: {payload}")
                 await self.broadcast_fn(payload)
-                log.info("Successfully executed broadcast_fn for clap event")
+                log.info(f"Broadcast clap event: {event_type} → {jarvis_state}")
             except Exception as e:
                 log.error(f"Broadcast clap event failed: {e}")
         else:
-            log.warning("Cannot broadcast clap event: broadcast_fn is None")
+            log.warning("Cannot broadcast clap event: no WebSocket clients")
 
     # ─── Wake Word Detection ──────────────────────────────────────────
 
