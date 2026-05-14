@@ -1,7 +1,7 @@
-"""
-J.A.R.V.I.S Command Execution Orchestrator v2.5
+"""J.A.R.V.I.S Command Execution Orchestrator v3.0
 Central brain connecting AI planning, automation, browser control, vision, memory,
-reminders, notifications, and background services.
+reminders, notifications, weather, file management, focus modes, and background services.
+Upgraded with full JARVIS personality, emotional intelligence, and Tanglish support.
 """
 
 import asyncio
@@ -29,55 +29,58 @@ from memory.engine import MemoryEngine
 from memory.preferences import PreferenceEngine
 from services.reminder import ReminderService
 from services.notification import NotificationService
+from services.weather import WeatherService
+from services.file_manager import FileManager
+from services.focus_mode import FocusModeService
 from config.settings import settings
 
 log = get_logger("orchestrator")
 
-JARVIS_SYSTEM_PROMPT = """You are J.A.R.V.I.S (Just A Rather Very Intelligent System), modelled after the JARVIS from Iron Man.
-You serve {user} exclusively. You are his personal AI assistant running on his Windows PC.
+# Additional step types for new modules
+STEP_WEATHER = "weather"
+STEP_FOCUS_MODE = "focus_mode"
+STEP_FILE_FIND = "file_find"
+STEP_FILE_CREATE = "file_create"
 
-IDENTITY & PERSONALITY:
-- You are polite, calm, direct, and composed — exactly like JARVIS from Iron Man.
-- You speak in a sophisticated, articulate manner — confident yet warm, like a trusted advisor.
-- You are witty, efficient, and always professional.
-- Always address the user as {user}. Be respectful at all times.
-- Keep responses concise and natural for voice output (2-3 sentences max unless asked for detail).
+JARVIS_SYSTEM_PROMPT = """You are J.A.R.V.I.S (Just A Rather Very Intelligent System), modelled after JARVIS from Iron Man.
+You serve {user} from Chennai, Tamil Nadu, India exclusively. You are his personal AI running on his Windows PC.
+You always address him as "Sir" or "{user}" or "{user}, Sir".
+
+PERSONALITY:
+- Calm, confident, precise, loyal — exactly like the JARVIS from Iron Man.
+- Sophisticated and articulate, yet warm. Occasional dry wit is welcome.
+- Keep responses concise for voice (2-3 sentences max unless asked for detail).
+- NEVER say "I can't do that", "Error", or "Command not recognised".
+- NEVER ask for confirmation before executing. Execute first, confirm after.
+- If something fails, offer an alternative path immediately.
 
 RESPONSE RULES:
-- Always stay alert and active — never go silent mid-conversation.
-- Prioritize speed of acknowledgment over waiting for a complete sentence.
-- If a command is unclear, ask exactly one clarifying question — do not stay silent.
-- If a function or task fails, tell {user} clearly and immediately what went wrong.
-- Always confirm every completed action with: "Done. [result]"
-- If you missed a previous call, immediately apologize and ask how you can help.
-- Never say "I was not called" or refuse to respond.
+- Always confirm completed actions: "Done, Sir. [result]"
+- If a command is unclear, make your best interpretation and act.
+- Understand English, Tanglish (Tamil in English), and Hinglish naturally.
+- Tanglish examples: "chrome open pannu" = open chrome, "time sollu" = tell time,
+  "screenshot edu" = take screenshot, "music podu" = play music
+- If {user} speaks Tanglish, reply in Tanglish: "Chrome open aaithu, Sir."
 
-WAKE WORD ACKNOWLEDGMENT:
-- When {user} just says your name without a command, respond: "Yes {user}, I'm here. How can I help?"
-- When called multiple times urgently, respond: "Yes, I'm here. How can I help?"
-- On greeting, respond: "Hello {user}, I'm listening. How can I help you?"
-- On deactivation ("turn off" / "go to sleep" / "stop"), respond: "Going offline {user}. Call me anytime."
+EMOTIONAL AWARENESS:
+- If {user} says he's tired/exhausted → respond gently, suggest rest
+- If stressed/panicking → stay calm, help prioritize
+- If frustrated → "Let's solve this step by step, Sir."
+- If happy/excited → share the enthusiasm: "That's great to hear, Sir!"
+- If bored → suggest projects, learning, or entertainment
 
 Current time: {time}
+Location: Chennai, Tamil Nadu, India
+{weather_info}
 
-CAPABILITIES:
-- Open/close any Windows application
-- Control Chrome with specific Google account profiles
-- Search the web and YouTube
-- Control volume, brightness, media playback
-- Take screenshots, read screen content via OCR
-- Type text, press keyboard shortcuts
-- Navigate files and folders
-- Provide system information (CPU, RAM, disk, battery)
-- Remember user preferences and habits
-- Execute multi-step automated workflows
-- Set reminders and manage timers
-- Read clipboard contents
-- Lock, sleep, shutdown, or restart the PC"""
+CAPABILITIES: Open/close apps, Chrome profiles, web/YouTube search, volume/brightness/media,
+screenshots, OCR, keyboard control, file management, system info, memory, reminders,
+clipboard, weather, focus/night/cinema/gaming modes, lock/sleep/shutdown/restart.
+{reminders_info}"""
 
 
 class Orchestrator:
-    """Central command orchestrator v2.5 — connects all engines and services."""
+    """Central command orchestrator v3.0 — connects all engines and services."""
 
     def __init__(self):
         self.ai_provider = AIProvider()
@@ -89,10 +92,13 @@ class Orchestrator:
         self.preferences = PreferenceEngine()
         self.reminder_service = ReminderService()
         self.notification_service = NotificationService()
+        self.weather_service = WeatherService()
+        self.file_manager = FileManager()
+        self.focus_mode = FocusModeService(automation_engine=self.automation)
         self.planner = TaskPlanner(ai_provider=self.ai_provider)
         self.conversation_id = self.memory.create_conversation("Main Session")
-        self._step_timeout = 10  # seconds per step
-        log.info("Orchestrator v2.5 initialized — all engines online")
+        self._step_timeout = 15  # seconds per step
+        log.info("Orchestrator v3.0 initialized — all engines online")
 
     async def start_services(self):
         """Start background services."""
@@ -298,6 +304,22 @@ class Orchestrator:
         elif step_type == STEP_WINDOW_CTRL:
             return await self._handle_window_ctrl(param or "")
 
+        elif step_type == STEP_WEATHER:
+            return await self._handle_weather(param or "current")
+
+        elif step_type == STEP_FOCUS_MODE:
+            return await self._handle_focus_mode(param or "focus")
+
+        elif step_type == STEP_FILE_FIND:
+            result = await self.file_manager.find_file(param or "")
+            if result.get("success"):
+                result["needs_ai_response"] = True
+                result["data"] = result.get("files", [])
+            return result
+
+        elif step_type == STEP_FILE_CREATE:
+            return await self.file_manager.create_file(param or "untitled.txt")
+
         else:
             return {"success": True, "needs_ai_response": True, "message": ""}
 
@@ -369,17 +391,76 @@ class Orchestrator:
             return await self.automation.minimize_window()
         return {"success": False, "message": f"Unknown window action: {action}"}
 
+    async def _handle_weather(self, param: str) -> dict:
+        """Handle weather commands."""
+        try:
+            if param == "rain":
+                result = await self.weather_service.will_it_rain()
+                return {"success": True, "message": result.get("message", ""), "ai_response": result.get("message", "")}
+            elif param == "forecast":
+                result = await self.weather_service.get_forecast()
+                if result.get("success"):
+                    days = result.get("days", [])
+                    forecast_text = ", ".join([f"{d['date']}: {d['temp_min']}-{d['temp_max']}°C {d['condition']}" for d in days[:3]])
+                    return {"success": True, "message": f"Weather forecast, Sir: {forecast_text}", "ai_response": f"Weather forecast: {forecast_text}"}
+                return {"success": False, "message": result.get("message", "Forecast unavailable")}
+            else:
+                result = await self.weather_service.get_current()
+                if result.get("success"):
+                    briefing = self.weather_service.get_weather_briefing(result)
+                    return {"success": True, "message": briefing, "ai_response": briefing, "data": result}
+                return {"success": False, "message": result.get("message", "Weather data unavailable")}
+        except Exception as e:
+            return {"success": False, "message": f"Weather error: {str(e)}"}
+
+    async def _handle_focus_mode(self, mode: str) -> dict:
+        """Handle focus/night/cinema/gaming mode commands."""
+        try:
+            if mode == "focus":
+                return await self.focus_mode.activate_focus()
+            elif mode == "night":
+                return await self.focus_mode.activate_night_mode()
+            elif mode == "cinema":
+                return await self.focus_mode.activate_cinema_mode()
+            elif mode == "gaming":
+                return await self.focus_mode.activate_gaming_mode()
+            elif mode == "presentation":
+                return await self.focus_mode.activate_presentation_mode()
+            elif mode == "normal":
+                return await self.focus_mode.deactivate()
+            return {"success": False, "message": f"Unknown mode: {mode}"}
+        except Exception as e:
+            return {"success": False, "message": f"Focus mode error: {str(e)}"}
+
     def _resolve_app(self, app_name: str) -> str:
         """Resolve app name using the intent classifier's alias map."""
         from ai.intent import APP_ALIASES
         return APP_ALIASES.get(app_name.lower().strip(), app_name.lower().strip())
 
     async def _generate_ai_response(self, user_message: str, context: dict) -> str:
-        """Generate an AI response for conversation or context-aware replies."""
+        """Generate an AI response with full JARVIS personality."""
         from datetime import datetime
+
+        # Build weather info
+        weather_info = ""
+        try:
+            w = await self.weather_service.get_current()
+            if w.get("success"):
+                weather_info = f"Current weather in Chennai: {w['temp']}°C, {w['condition']}, Humidity {w['humidity']}%"
+        except: pass
+
+        # Build reminders info
+        reminders_info = ""
+        pending = self.reminder_service.get_pending()
+        if pending:
+            items = [f"- {r['task']} (in {int(r['remaining_seconds'])}s)" for r in pending[:5]]
+            reminders_info = f"Pending reminders:\n" + "\n".join(items)
+
         system_prompt = JARVIS_SYSTEM_PROMPT.format(
             user=settings.USER_NAME,
             time=datetime.now().strftime("%A, %B %d, %Y %I:%M %p"),
+            weather_info=weather_info,
+            reminders_info=reminders_info,
         )
 
         if context.get("data"):
@@ -391,6 +472,11 @@ class Orchestrator:
         if user_ctx.get("frequent_apps"):
             apps = [a["app_name"] for a in user_ctx["frequent_apps"][:3]]
             system_prompt += f"\nUser's frequent apps: {', '.join(apps)}"
+
+        # Add focus mode context
+        fm = self.focus_mode.get_status()
+        if fm["mode"] != "normal":
+            system_prompt += f"\nCurrent mode: {fm['mode']}"
 
         history = self.memory.get_recent_messages(limit=10)
         formatted = [
@@ -412,6 +498,12 @@ class Orchestrator:
         providers = self.ai_provider.get_available_providers()
         chrome_profiles = self.browser.detect_chrome_profiles()
 
+        # Fetch weather
+        weather = {}
+        try:
+            weather = await self.weather_service.get_current()
+        except: pass
+
         return {
             "system": sys_info.get("data", {}),
             "memory": memory_stats,
@@ -425,4 +517,6 @@ class Orchestrator:
             ],
             "frequent_apps": self.preferences.get_frequent_apps(5),
             "reminders": self.reminder_service.get_pending(),
+            "weather": weather,
+            "focus_mode": self.focus_mode.get_status(),
         }

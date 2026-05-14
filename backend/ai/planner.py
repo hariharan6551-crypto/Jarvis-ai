@@ -39,6 +39,10 @@ STEP_CONVERSATION = "conversation"
 STEP_SET_REMINDER = "set_reminder"
 STEP_CLIPBOARD = "clipboard"
 STEP_WINDOW_CTRL = "window_control"
+STEP_WEATHER = "weather"
+STEP_FOCUS_MODE = "focus_mode"
+STEP_FILE_FIND = "file_find"
+STEP_FILE_CREATE = "file_create"
 
 
 # ─── Task Status Tracking ────────────────────────────────────────────
@@ -129,6 +133,70 @@ class TaskPlanner:
                 {"type": STEP_BROWSER_PROFILE, "param": resolved},
             ]
 
+        # ══════════════════════════════════════════════════════════════
+        # TANGLISH COMMANDS (Tamil + English)
+        # ══════════════════════════════════════════════════════════════
+
+        # Tanglish open: "chrome open pannu", "notepad thuru"
+        tanglish_open = re.match(r"(.+?)\s+(?:open\s+pannu|thuru|open\s+pannuda|open\s+podu)", text_lower)
+        if tanglish_open:
+            return [{"type": STEP_OPEN_APP, "param": tanglish_open.group(1).strip()}]
+
+        # Tanglish close: "chrome close pannu", "chrome ah moodu"
+        tanglish_close = re.match(r"(.+?)\s+(?:close\s+pannu|moodu|close\s+pannuda|ah\s+moodu)", text_lower)
+        if tanglish_close:
+            return [{"type": STEP_CLOSE_APP, "param": tanglish_close.group(1).strip()}]
+
+        # Tanglish screenshot: "screenshot edu", "screen capture pannu"
+        if re.search(r"screenshot\s+edu|screen\s+capture\s+pannu|screen\s+edu", text_lower):
+            return [{"type": STEP_SCREENSHOT, "param": None}]
+
+        # Tanglish time: "time sollu", "neram enna", "mani enna"
+        if re.search(r"time\s+sollu|neram\s+enna|mani\s+enna|time\s+enna", text_lower):
+            from datetime import datetime
+            now = datetime.now().strftime("%I:%M %p")
+            return [{"type": STEP_SPEAK, "param": f"Sir, ippo time {now}"}]
+
+        # Tanglish date: "date sollu", "enna date"
+        if re.search(r"date\s+sollu|enna\s+date|inaikku\s+enna", text_lower):
+            from datetime import datetime
+            today = datetime.now().strftime("%A, %B %d, %Y")
+            return [{"type": STEP_SPEAK, "param": f"Sir, inaikku {today}"}]
+
+        # Tanglish volume: "volume uyarthu/kuraithu"
+        if re.search(r"volume\s+(?:uyarthu|ethu|athigam|high)", text_lower):
+            return [{"type": STEP_VOLUME, "param": "up"}]
+        if re.search(r"volume\s+(?:kuraithu|thazhthu|kammi|low)", text_lower):
+            return [{"type": STEP_VOLUME, "param": "down"}]
+
+        # Tanglish music: "music podu", "paattu podu"
+        if re.search(r"music\s+podu|paattu\s+podu|song\s+podu|play\s+pannu", text_lower):
+            return [{"type": STEP_MEDIA, "param": "play"}]
+        if re.search(r"music\s+niruthu|paattu\s+niruthu|stop\s+pannu|pause\s+pannu", text_lower):
+            return [{"type": STEP_MEDIA, "param": "pause"}]
+
+        # Tanglish search: "google la search pannu", "youtube la search pannu"
+        tanglish_yt = re.match(r"youtube\s+(?:la|ula)\s+(?:search\s+pannu|thedi)\s+(.+)", text_lower)
+        if tanglish_yt:
+            return [{"type": STEP_SEARCH_YOUTUBE, "param": tanglish_yt.group(1).strip()}]
+        tanglish_search = re.match(r"(?:google\s+(?:la|ula)\s+(?:search\s+pannu|thedi)|thedi)\s+(.+)", text_lower)
+        if tanglish_search:
+            return [{"type": STEP_SEARCH_WEB, "param": tanglish_search.group(1).strip()}]
+
+        # Tanglish weather: "weather sollu", "weather eppadi"
+        if re.search(r"weather\s+(?:sollu|eppadi|enna)|vaanilai\s+(?:sollu|enna)", text_lower):
+            return [{"type": STEP_WEATHER, "param": "current"}]
+
+        # Tanglish shutdown/lock/sleep
+        if re.search(r"pc\s+(?:ah\s+)?(?:off\s+pannu|anaippu|shut\s+pannu)", text_lower):
+            return [{"type": STEP_SYSTEM_CMD, "param": "shutdown"}]
+        if re.search(r"pc\s+(?:ah\s+)?(?:lock\s+pannu|pootu)", text_lower):
+            return [{"type": STEP_SYSTEM_CMD, "param": "lock"}]
+
+        # ══════════════════════════════════════════════════════════════
+        # ENGLISH COMMANDS
+        # ══════════════════════════════════════════════════════════════
+
         # ── Open app ──
         open_match = re.match(r"(?:open|launch|start|run)\s+(.+)", text_lower)
         if open_match:
@@ -158,6 +226,33 @@ class TaskPlanner:
         if search_match and "youtube" not in text_lower:
             query = search_match.group(1).strip()
             return [{"type": STEP_SEARCH_WEB, "param": query}]
+
+        # ── Weather ──
+        if re.search(r"(?:what(?:'s|\s+is)\s+(?:the\s+)?)?weather|how(?:'s|\s+is)\s+(?:the\s+)?weather|will\s+it\s+rain|temperature", text_lower):
+            if re.search(r"rain", text_lower):
+                return [{"type": STEP_WEATHER, "param": "rain"}]
+            if re.search(r"forecast", text_lower):
+                return [{"type": STEP_WEATHER, "param": "forecast"}]
+            return [{"type": STEP_WEATHER, "param": "current"}]
+
+        # ── Focus / Night / Cinema / Gaming modes ──
+        if re.search(r"(?:activate|start|enable)\s+focus\s+(?:mode)?|focus\s+mode", text_lower):
+            return [{"type": STEP_FOCUS_MODE, "param": "focus"}]
+        if re.search(r"(?:activate|start|enable)\s+night\s+(?:mode)?|night\s+mode", text_lower):
+            return [{"type": STEP_FOCUS_MODE, "param": "night"}]
+        if re.search(r"(?:activate|start|enable)\s+cinema\s+(?:mode)?|cinema\s+mode|movie\s+mode", text_lower):
+            return [{"type": STEP_FOCUS_MODE, "param": "cinema"}]
+        if re.search(r"(?:activate|start|enable)\s+gaming\s+(?:mode)?|gaming\s+mode|game\s+mode", text_lower):
+            return [{"type": STEP_FOCUS_MODE, "param": "gaming"}]
+        if re.search(r"(?:activate|start|enable)\s+presentation\s+(?:mode)?|presentation\s+mode", text_lower):
+            return [{"type": STEP_FOCUS_MODE, "param": "presentation"}]
+        if re.search(r"(?:deactivate|stop|disable|exit)\s+(?:focus|night|cinema|gaming|presentation)\s+(?:mode)?|normal\s+mode", text_lower):
+            return [{"type": STEP_FOCUS_MODE, "param": "normal"}]
+
+        # ── File operations ──
+        file_find = re.match(r"(?:find|locate|search\s+for)\s+(?:file\s+)?(.+?)(?:\s+(?:file|on\s+my\s+pc))?$", text_lower)
+        if file_find and not re.search(r"youtube|google|web", text_lower):
+            return [{"type": STEP_FILE_FIND, "param": file_find.group(1).strip()}]
 
         # ── Volume ──
         if re.search(r"(?:increase|raise|turn\s+up)\s+(?:the\s+)?volume|volume\s+up|louder", text_lower):
@@ -252,8 +347,10 @@ class TaskPlanner:
         if re.search(r"read\s+(?:the\s+)?clipboard|what(?:'s|\s+is)\s+(?:in\s+)?(?:the\s+)?clipboard", text_lower):
             return [{"type": STEP_CLIPBOARD, "param": "read"}]
 
-        # ── Simple greetings ──
-        greetings = ["hello", "hi", "hey", "good morning", "good afternoon", "good evening", "howdy", "how are you"]
+        # ── Simple greetings (English + Tanglish) ──
+        greetings = ["hello", "hi", "hey", "good morning", "good afternoon", "good evening",
+                     "howdy", "how are you", "vanakkam", "vaanga", "eppadi irukeenga",
+                     "nandri", "thanks", "thank you"]
         if text_lower in greetings or any(text_lower.startswith(g) for g in greetings):
             return [{"type": STEP_CONVERSATION, "param": text_lower}]
 

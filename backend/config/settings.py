@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     DEFAULT_AI_PROVIDER: str = "gemini"
     DEFAULT_AI_MODEL: str = "gemini-1.5-flash"
 
+    # Weather
+    OPENWEATHER_API_KEY: Optional[str] = None
+
     # Voice
     WHISPER_MODEL: str = "base"
     TTS_PROVIDER: str = "edge"  # edge, elevenlabs, pyttsx3

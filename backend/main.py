@@ -486,6 +486,94 @@ async def api_test_clap():
     return {"sent": True, "clients": len(connected_clients), "message": msg}
 
 
+@app.get("/api/weather")
+async def api_weather():
+    """Get current weather for Chennai."""
+    if orchestrator:
+        result = await orchestrator.weather_service.get_current()
+        return result
+    return {"success": False, "message": "Service not ready"}
+
+
+@app.get("/api/weather/rain")
+async def api_weather_rain():
+    """Check if it will rain today."""
+    if orchestrator:
+        return await orchestrator.weather_service.will_it_rain()
+    return {"success": False, "message": "Service not ready"}
+
+
+@app.get("/api/weather/forecast")
+async def api_weather_forecast():
+    """Get weather forecast."""
+    if orchestrator:
+        return await orchestrator.weather_service.get_forecast()
+    return {"success": False, "message": "Service not ready"}
+
+
+class FocusModeRequest(BaseModel):
+    mode: str = "focus"
+    duration: int = 45
+
+
+@app.post("/api/focus-mode")
+async def api_focus_mode(req: FocusModeRequest):
+    """Activate a focus mode."""
+    if not orchestrator:
+        raise HTTPException(503, "Orchestrator not initialized")
+    mode = req.mode.lower()
+    if mode == "focus":
+        return await orchestrator.focus_mode.activate_focus(req.duration)
+    elif mode == "night":
+        return await orchestrator.focus_mode.activate_night_mode()
+    elif mode == "cinema":
+        return await orchestrator.focus_mode.activate_cinema_mode()
+    elif mode == "gaming":
+        return await orchestrator.focus_mode.activate_gaming_mode()
+    elif mode == "presentation":
+        return await orchestrator.focus_mode.activate_presentation_mode()
+    elif mode == "normal":
+        return await orchestrator.focus_mode.deactivate()
+    return {"success": False, "message": f"Unknown mode: {mode}"}
+
+
+@app.get("/api/focus-mode/status")
+async def api_focus_status():
+    """Get current focus mode status."""
+    if orchestrator:
+        return orchestrator.focus_mode.get_status()
+    return {"mode": "normal"}
+
+
+class FileFindRequest(BaseModel):
+    filename: str
+    path: str = None
+
+
+@app.post("/api/files/find")
+async def api_file_find(req: FileFindRequest):
+    """Find a file on the PC."""
+    if not orchestrator:
+        raise HTTPException(503, "Orchestrator not initialized")
+    return await orchestrator.file_manager.find_file(req.filename, req.path)
+
+
+@app.get("/api/files/recent")
+async def api_recent_files():
+    """Get recently modified files."""
+    if orchestrator:
+        return await orchestrator.file_manager.get_recent_files()
+    return {"success": False, "files": []}
+
+
+@app.get("/api/files/large")
+async def api_large_files():
+    """Find large files."""
+    if orchestrator:
+        return await orchestrator.file_manager.find_large_files()
+    return {"success": False, "files": []}
+
+
 # ═══════════════════════════════════════════════════════════════════════
 #  ENTRY POINT
 # ═══════════════════════════════════════════════════════════════════════
