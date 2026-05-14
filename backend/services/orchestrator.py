@@ -32,6 +32,10 @@ from services.notification import NotificationService
 from services.weather import WeatherService
 from services.file_manager import FileManager
 from services.focus_mode import FocusModeService
+from agents.manager import AgentManager
+from agents.commander import CommanderAgent
+from agents.automation_agent import AutomationAgent
+from agents.vision_agent import VisionAgent
 from config.settings import settings
 
 log = get_logger("orchestrator")
@@ -96,9 +100,28 @@ class Orchestrator:
         self.file_manager = FileManager()
         self.focus_mode = FocusModeService(automation_engine=self.automation)
         self.planner = TaskPlanner(ai_provider=self.ai_provider)
+        
+        # Initialize Multi-Agent System
+        self.agent_manager = AgentManager(self)
+        self._init_agents()
+        
         self.conversation_id = self.memory.create_conversation("Main Session")
         self._step_timeout = 15  # seconds per step
-        log.info("Orchestrator v3.0 initialized — all engines online")
+        log.info("Orchestrator v3.0 initialized — all engines and agents online")
+
+    def _init_agents(self):
+        """Initialize and register all specialized agents."""
+        commander = CommanderAgent(self, self.ai_provider)
+        automation_agent = AutomationAgent(self, self.automation, self.browser)
+        vision_agent = VisionAgent(self, self.vision)
+        
+        self.agent_manager.register_agent(commander)
+        self.agent_manager.register_agent(automation_agent)
+        self.agent_manager.register_agent(vision_agent)
+
+    async def route_agent_message(self, source: str, target: str, message: str, context: dict = None) -> dict:
+        """Route a message from one agent to another using the AgentManager."""
+        return await self.agent_manager.route_message(source, target, message, context)
 
     async def start_services(self):
         """Start background services."""

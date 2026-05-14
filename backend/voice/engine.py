@@ -398,9 +398,9 @@ class VoiceEngine:
 
             sample_rate = 44100
             block_size = 2048
-            clap_threshold = 0.12
-            clap_cooldown = 0.20       # Min time between claps (seconds)
-            multi_clap_window = 0.90   # Window to detect multiple claps
+            clap_threshold = 0.25      # Raised: prevents false triggers from typing/ambient noise
+            clap_cooldown = 0.30       # Min time between claps (seconds)
+            multi_clap_window = 0.80   # Window to detect multiple claps
 
             clap_times = []
             noise_samples = []
@@ -427,8 +427,8 @@ class VoiceEngine:
                     if calibrating:
                         return
 
-                    # Adaptive threshold: must be well above noise floor
-                    adaptive_thresh = max(clap_threshold, noise_floor * 3.5)
+                    # Adaptive threshold: must be well above noise floor (5x = very strict)
+                    adaptive_thresh = max(clap_threshold, noise_floor * 5.0)
 
                     if amplitude > adaptive_thresh:
                         now = time.time()

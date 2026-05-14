@@ -48,3 +48,7 @@ sounddevice==0.5.0
 soundfile==0.12.1
 scipy==1.14.1
 webrtcvad==2.0.10
+
+# Realtime Audio
+livekit>=1.1.8
+livekit-api>=1.1.0

@@ -58,6 +58,7 @@ voice_engine = None
 watchdog = None
 health_monitor = None
 system_monitor = None
+livekit_service = None
 connected_clients: list[WebSocket] = []
 
 
@@ -142,6 +143,15 @@ async def startup():
         log.info("✓ Orchestrator initialized (AI + automation + memory + services)")
     except Exception as e:
         log.error(f"✗ Orchestrator failed: {e}")
+
+    # Step 3.5: LiveKit Service
+    try:
+        from livekit.service import LiveKitService
+        livekit_service = LiveKitService()
+        asyncio.create_task(livekit_service.connect_agent())
+        log.info("✓ LiveKit Service initialized")
+    except Exception as e:
+        log.error(f"✗ LiveKit Service failed: {e}")
 
     # Step 4: System Monitor (background stats broadcaster)
     try:
@@ -368,6 +378,16 @@ async def api_command(req: CommandRequest):
         raise HTTPException(503, "Orchestrator not initialized")
     result = await orchestrator.process_command(req.text)
     return result
+
+@app.get("/api/livekit/token")
+async def api_livekit_token(participant: str = "User"):
+    """Get a LiveKit token for the frontend connection."""
+    if not livekit_service:
+        raise HTTPException(503, "LiveKit service not initialized")
+    token = livekit_service.generate_token(participant)
+    if not token:
+        raise HTTPException(500, "Failed to generate token")
+    return {"token": token, "url": livekit_service.url}
 
 
 @app.post("/api/tts")

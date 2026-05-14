@@ -32,6 +32,10 @@ const useStore = create((set, get) => ({
   waveformData: Array(32).fill(4),
   _autoDeactivateTimer: null,
 
+  // Voice control state
+  isSpeaking: false,          // true while TTS is playing (mutes mic)
+  pushToTalkActive: false,    // true during push-to-talk capture
+
   // Theme
   theme: localStorage.getItem('jarvis-theme') || 'dark',
 
@@ -54,6 +58,8 @@ const useStore = create((set, get) => ({
   setTranscription: (t) => set({ transcription: t }),
   setSystemInfo: (info) => set({ systemInfo: info }),
   setJarvisActive: (v) => set({ jarvisActive: v }),
+  setIsSpeaking: (v) => set({ isSpeaking: v }),
+  setPushToTalkActive: (v) => set({ pushToTalkActive: v }),
 
   toggleTheme: () => {
     const newTheme = get().theme === 'dark' ? 'light' : 'dark';
@@ -303,9 +309,13 @@ const useStore = create((set, get) => ({
       const blob = new Blob([bytes], { type: 'audio/mp3' });
       const url = URL.createObjectURL(blob);
       const audio = new Audio(url);
-      set({ aiState: 'speaking' });
-      audio.onended = () => { set({ aiState: 'idle' }); URL.revokeObjectURL(url); };
-      audio.play().catch(() => set({ aiState: 'idle' }));
+      set({ aiState: 'speaking', isSpeaking: true });
+      audio.onended = () => {
+        URL.revokeObjectURL(url);
+        // Delay clearing isSpeaking so mic doesn't pick up tail-end
+        setTimeout(() => set({ aiState: 'idle', isSpeaking: false }), 500);
+      };
+      audio.play().catch(() => set({ aiState: 'idle', isSpeaking: false }));
     } catch (e) { console.error('Audio play error', e); }
   },
 }));

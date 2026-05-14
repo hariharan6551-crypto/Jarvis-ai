@@ -170,6 +170,8 @@ function speakBrowser(text) {
 
 // ─── Backend TTS with browser fallback ────────────────────────────
 async function speakBackend(text) {
+  // Set speaking flag to mute mic during TTS
+  useStore.getState().setIsSpeaking(true);
   try {
     const res = await fetch('http://127.0.0.1:8765/api/tts', {
       method: 'POST',
@@ -184,62 +186,100 @@ async function speakBackend(text) {
       const blob = new Blob([bytes], { type: 'audio/mp3' });
       const url = URL.createObjectURL(blob);
       const audio = new Audio(url);
-      audio.play().catch(() => speakBrowser(text));
-      audio.onended = () => URL.revokeObjectURL(url);
+      audio.onended = () => {
+        URL.revokeObjectURL(url);
+        // Delay re-enabling mic so it doesn't pick up tail-end of audio
+        setTimeout(() => useStore.getState().setIsSpeaking(false), 600);
+      };
+      audio.onerror = () => {
+        useStore.getState().setIsSpeaking(false);
+      };
+      audio.play().catch(() => {
+        speakBrowser(text);
+        setTimeout(() => useStore.getState().setIsSpeaking(false), 2000);
+      });
       return;
     }
   } catch (e) { /* fallback */ }
   speakBrowser(text);
+  setTimeout(() => useStore.getState().setIsSpeaking(false), 2000);
 }
 
-// ─── Voice Recognition (Web Speech API) ──────────────────────────
-// Handles wake word "JARVIS" detection + active-mode command capture.
-// Clap detection is handled by the BACKEND via sounddevice.
+// ═══════════════════════════════════════════════════════════════════
+//  VOICE RECOGNITION ENGINE v3.0 — Bulletproof
+//  Fixes: en-IN language, anti-feedback, robust restart, push-to-talk
+// ═══════════════════════════════════════════════════════════════════
+
+// Global voice state
+let _voiceRecInstance = null;
+let _voiceRestartCount = 0;
+let _voiceHeartbeatInterval = null;
+let _voiceLastResultTime = 0;
+
 function startVoiceRecognition() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SR) {
-    console.warn('Web Speech API not supported in this browser');
+    console.warn('❌ Web Speech API not supported — voice commands unavailable');
+    showToast({ title: 'Voice Unavailable', message: 'This browser does not support voice recognition. Use Chrome or Edge.', type: 'warning' });
     return null;
   }
 
   const rec = new SR();
   rec.continuous = true;
   rec.interimResults = true;
-  rec.lang = 'en-US';
-  rec.maxAlternatives = 1;
+  rec.lang = 'en-IN'; // ← FIXED: Indian English for better recognition
+  rec.maxAlternatives = 3; // ← More alternatives for better matching
+
+  let wakeWordTriggeredThisPhrase = false;
+  let lastRestartTime = 0;
 
   rec.onstart = () => {
     useStore.getState().setRecording(true);
-    console.log('🎤 Voice recognition active — say "JARVIS" to activate');
+    _voiceRestartCount = 0;
+    console.log('🎤 Voice recognition STARTED — say "JARVIS" to activate');
   };
 
-  // Track whether wake word was already triggered in the current speech phrase
-  let wakeWordTriggeredThisPhrase = false;
-
   rec.onresult = (event) => {
+    _voiceLastResultTime = Date.now();
+    const store = useStore.getState();
+
+    // ━━━ ANTI-FEEDBACK: Skip processing while JARVIS is speaking ━━━
+    if (store.isSpeaking) {
+      return; // Don't process our own TTS output
+    }
+
     for (let i = event.resultIndex; i < event.results.length; i++) {
       const isFinal = event.results[i].isFinal;
       const transcript = event.results[i][0].transcript.trim();
       const lower = transcript.toLowerCase();
 
-      if (!lower) continue;
+      if (!lower || lower.length < 2) continue;
 
-      if (isFinal) {
-        console.log('🗣️ Final:', transcript);
+      // Check ALL alternatives for wake word (improves detection rate)
+      let hasWakeWord = /jarvis|j[\.\s]*a[\.\s]*r[\.\s]*v[\.\s]*i[\.\s]*s/i.test(lower);
+      if (!hasWakeWord) {
+        for (let a = 1; a < event.results[i].length; a++) {
+          const alt = (event.results[i][a]?.transcript || '').toLowerCase();
+          if (/jarvis|j[\.\s]*a[\.\s]*r[\.\s]*v[\.\s]*i[\.\s]*s/i.test(alt)) {
+            hasWakeWord = true;
+            break;
+          }
+        }
       }
 
-      const store = useStore.getState();
-      const hasWakeWord = /jarvis|j\.?a\.?r\.?v\.?i\.?s\.?/i.test(lower);
+      if (isFinal) {
+        console.log('🗣️ Final heard:', transcript);
+      }
 
-      // ━━━ 1. DEACTIVATION COMMANDS (always check first) ━━━
-      if (isFinal && /^(turn off|go to sleep|stop listening|deactivate|good\s*night|shut down|jarvis stop)$/i.test(lower)) {
+      // ━━━ 1. DEACTIVATION COMMANDS ━━━
+      if (isFinal && /^(turn off|go to sleep|stop listening|deactivate|good\s*night|shut down|jarvis stop|stop jarvis|jarvis off)$/i.test(lower)) {
         store.setJarvisActive(false);
         store.setAiState('idle');
         wakeWordTriggeredThisPhrase = false;
-        showToast({ title: 'J.A.R.V.I.S', message: 'Going offline Hari. Call me anytime.', type: 'info' });
-        store.addChatMessage({ role: 'assistant', content: 'Going offline Hari. Call me anytime.' });
-        speakBackend('Going offline Hari. Call me anytime.');
-        return; // Done processing this batch
+        showToast({ title: 'J.A.R.V.I.S', message: 'Going offline, Sir. Call me anytime.', type: 'info' });
+        store.addChatMessage({ role: 'assistant', content: 'Going offline, Sir. Call me anytime.' });
+        speakBackend('Going offline, Sir. Call me anytime.');
+        return;
       }
 
       // ━━━ 2. WAKE WORD DETECTION ━━━
@@ -247,80 +287,209 @@ function startVoiceRecognition() {
         wakeWordTriggeredThisPhrase = true;
         store.setJarvisActive(true);
         store.setAiState('listening');
-        console.log('🗣️ Wake word detected — JARVIS activated');
+        console.log('🟢 JARVIS wake word detected!');
 
         if (!isFinal) {
-          // Interim result: just activate UI, wait for the final sentence
-          continue;
+          continue; // Wait for full phrase
         }
       }
 
-      // Only process final results from here
       if (!isFinal) continue;
 
       // ━━━ 3. WAKE WORD + COMMAND IN SAME PHRASE ━━━
       if (wakeWordTriggeredThisPhrase) {
-        wakeWordTriggeredThisPhrase = false; // Reset for next phrase
+        wakeWordTriggeredThisPhrase = false;
 
-        // Extract command text after the wake word
         const cleaned = lower
-          .replace(/hey\s+(jarvis|j\.?a\.?r\.?v\.?i\.?s\.?)|(jarvis|j\.?a\.?r\.?v\.?i\.?s\.?)/gi, '')
+          .replace(/hey\s+(jarvis|j[\.\s]*a[\.\s]*r[\.\s]*v[\.\s]*i[\.\s]*s)|(jarvis|j[\.\s]*a[\.\s]*r[\.\s]*v[\.\s]*i[\.\s]*s)/gi, '')
           .replace(/^\s*[,.\s]+/, '')
           .trim();
 
-        if (cleaned) {
-          // Wake word + command: "JARVIS open chrome"
-          console.log('🎯 Wake word + command:', cleaned);
-          showToast({ title: 'J.A.R.V.I.S', message: `Processing: "${cleaned}"`, type: 'info' });
+        if (cleaned && cleaned.length > 1) {
+          console.log('🎯 Voice command:', cleaned);
+          showToast({ title: '🎤 Voice Command', message: `"${cleaned}"`, type: 'info' });
           store.sendCommand(cleaned);
         } else {
-          // Just the wake word: "JARVIS" / "Hey JARVIS"
-          showToast({ title: 'J.A.R.V.I.S', message: 'Hey Hari, how can I help you?', type: 'info' });
-          store.addChatMessage({ role: 'assistant', content: 'Hey Hari, how can I help you?' });
-          speakBackend('Hey Hari, how can I help you?');
+          showToast({ title: 'J.A.R.V.I.S', message: 'Yes Sir, I\'m listening.', type: 'info' });
+          store.addChatMessage({ role: 'assistant', content: 'Yes Sir, I\'m listening. What can I do for you?' });
+          speakBackend('Yes Sir, I\'m listening. What can I do for you?');
         }
         store._startAutoDeactivateTimer();
-        return; // Done processing this batch
+        return;
       }
 
-      // ━━━ 4. COMMAND WHILE JARVIS IS ALREADY ACTIVE (no wake word needed) ━━━
+      // ━━━ 4. COMMAND WHILE JARVIS IS ACTIVE (no wake word needed) ━━━
       if (store.jarvisActive) {
         console.log('🎯 Active mode command:', transcript);
-        showToast({ title: 'J.A.R.V.I.S', message: `Processing: "${transcript}"`, type: 'info' });
+        showToast({ title: '🎤 Voice Command', message: `"${transcript}"`, type: 'info' });
         store.sendCommand(transcript);
         store._startAutoDeactivateTimer();
-        return; // Done processing this batch
+        return;
       }
-
-      // If JARVIS is not active and no wake word, ignore the speech
     }
   };
 
   rec.onerror = (event) => {
-    if (event.error !== 'no-speech') {
-      console.warn('Voice error:', event.error);
+    if (event.error === 'no-speech') {
+      // Normal — no speech detected, will auto-restart
+      return;
+    }
+    if (event.error === 'aborted') {
+      console.log('🎤 Voice recognition aborted (restarting...)');
+      return;
+    }
+    console.warn('🎤 Voice error:', event.error);
+    if (event.error === 'not-allowed') {
+      showToast({ title: 'Microphone Blocked', message: 'Please allow microphone access in your browser settings.', type: 'warning' });
+      useStore.getState().setRecording(false);
     }
   };
 
-  // Auto-restart on end to keep listening forever
+  // ━━━ ROBUST AUTO-RESTART ━━━
   rec.onend = () => {
     useStore.getState().setRecording(false);
-    if (!rec._stopped) {
-      setTimeout(() => {
-        try { rec.start(); } catch (e) {
-          setTimeout(() => { try { rec.start(); } catch (e2) {} }, 1500);
-        }
-      }, 500);
+    wakeWordTriggeredThisPhrase = false;
+
+    if (rec._stopped) {
+      console.log('🎤 Voice recognition stopped (manual)');
+      return;
     }
+
+    _voiceRestartCount++;
+    // Exponential backoff: 300ms, 600ms, 1200ms, max 3000ms
+    const delay = Math.min(300 * Math.pow(1.5, Math.min(_voiceRestartCount - 1, 5)), 3000);
+    console.log(`🎤 Voice recognition ended — restarting in ${delay}ms (attempt ${_voiceRestartCount})`);
+
+    setTimeout(() => {
+      if (rec._stopped) return;
+      try {
+        rec.start();
+      } catch (e) {
+        console.warn('🎤 Restart failed, retrying in 2s...', e.message);
+        setTimeout(() => {
+          if (rec._stopped) return;
+          try { rec.start(); } catch (e2) {
+            console.error('🎤 Voice restart failed twice:', e2.message);
+          }
+        }, 2000);
+      }
+    }, delay);
   };
 
+  // Start recognition
   rec._stopped = false;
-  try { rec.start(); } catch (e) {
-    setTimeout(() => { try { rec.start(); } catch (e2) {} }, 1500);
+  try {
+    rec.start();
+    console.log('🎤 Voice recognition initialized (lang: en-IN)');
+  } catch (e) {
+    console.error('🎤 Failed to start voice recognition:', e);
+    setTimeout(() => {
+      try { rec.start(); } catch (e2) {
+        console.error('🎤 Voice start retry failed:', e2);
+      }
+    }, 2000);
   }
+
+  _voiceRecInstance = rec;
+
+  // ━━━ HEARTBEAT: Check every 10s if recognition is still alive ━━━
+  if (_voiceHeartbeatInterval) clearInterval(_voiceHeartbeatInterval);
+  _voiceHeartbeatInterval = setInterval(() => {
+    if (rec._stopped) {
+      clearInterval(_voiceHeartbeatInterval);
+      return;
+    }
+    const isRecording = useStore.getState().isRecording;
+    if (!isRecording) {
+      console.log('💓 Voice heartbeat: recognition not running, forcing restart...');
+      try {
+        rec.start();
+      } catch (e) {
+        // Already running or other error
+      }
+    }
+  }, 10000);
 
   return rec;
 }
+
+// ─── PUSH-TO-TALK: Single-shot voice capture ──────────────────────
+// This is the MOST RELIABLE way to give a voice command.
+// User clicks mic → speaks → JARVIS processes.
+window._jarvisPushToTalk = function() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) {
+    showToast({ title: 'Voice Unavailable', message: 'Speech recognition not supported.', type: 'warning' });
+    return;
+  }
+
+  const store = useStore.getState();
+
+  // Pause continuous recognition during push-to-talk
+  if (_voiceRecInstance && !_voiceRecInstance._stopped) {
+    try {
+      _voiceRecInstance._stopped = true;
+      _voiceRecInstance.stop();
+    } catch (e) {}
+  }
+
+  const ptt = new SR();
+  ptt.continuous = false;
+  ptt.interimResults = false;
+  ptt.lang = 'en-IN';
+  ptt.maxAlternatives = 3;
+
+  store.setJarvisActive(true);
+  store.setAiState('listening');
+  store.setPushToTalkActive(true);
+  showToast({ title: '🎤 Listening...', message: 'Speak your command now, Sir.', type: 'info' });
+
+  ptt.onresult = (event) => {
+    const transcript = event.results[0][0].transcript.trim();
+    if (!transcript) return;
+
+    console.log('🎤 Push-to-talk heard:', transcript);
+
+    // Remove wake word if present
+    const cleaned = transcript
+      .replace(/hey\s+jarvis|jarvis/gi, '')
+      .replace(/^\s*[,.\s]+/, '')
+      .trim();
+
+    const command = cleaned || transcript;
+    showToast({ title: '🎤 Command', message: `"${command}"`, type: 'info' });
+    store.sendCommand(command);
+    store._startAutoDeactivateTimer();
+  };
+
+  ptt.onerror = (event) => {
+    console.warn('🎤 Push-to-talk error:', event.error);
+    store.setPushToTalkActive(false);
+    if (event.error === 'no-speech') {
+      showToast({ title: '🎤 No Speech', message: 'I didn\'t hear anything. Try again, Sir.', type: 'info' });
+    } else if (event.error === 'not-allowed') {
+      showToast({ title: 'Mic Blocked', message: 'Microphone access denied. Check browser permissions.', type: 'warning' });
+    }
+  };
+
+  ptt.onend = () => {
+    store.setPushToTalkActive(false);
+    // Resume continuous recognition
+    setTimeout(() => {
+      if (_voiceRecInstance) {
+        _voiceRecInstance._stopped = false;
+        try { _voiceRecInstance.start(); } catch (e) {}
+      }
+    }, 500);
+  };
+
+  try {
+    ptt.start();
+  } catch (e) {
+    console.error('🎤 Push-to-talk start failed:', e);
+    store.setPushToTalkActive(false);
+  }
+};
 
 export default function App() {
   const showBoot = useStore(s => s.showBoot);
@@ -333,12 +502,12 @@ export default function App() {
 
   const onBootComplete = useCallback(() => {
     setShowBoot(false);
-    setTimeout(() => speakBackend("Welcome back Hari. All systems are operational. How may I assist you today?"), 500);
+    setTimeout(() => speakBackend("Welcome back, Sir. All systems are operational. How may I assist you today?"), 500);
     setTimeout(() => {
       if (!voiceRef.current) {
         voiceRef.current = startVoiceRecognition();
       }
-    }, 1500);
+    }, 2000);
   }, [setShowBoot]);
 
   useEffect(() => {
@@ -358,6 +527,7 @@ export default function App() {
     return () => {
       clearTimeout(t);
       clearInterval(interval);
+      if (_voiceHeartbeatInterval) clearInterval(_voiceHeartbeatInterval);
       if (voiceRef.current) {
         try { voiceRef.current._stopped = true; voiceRef.current.onend = null; voiceRef.current.stop(); } catch (e) {}
       }

@@ -59,9 +59,21 @@ function stopBackend() {
 
 // ── Window Creation ──────────────────────────────────────────────────
 function createWindow() {
-  // Auto-allow microphone/audio permissions
+  // Auto-allow microphone/audio permissions for voice recognition
   session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
-    callback(true); // Allow all permissions (mic, audio, media)
+    // Always grant mic, audio, media permissions for JARVIS voice
+    const allowedPermissions = ['media', 'microphone', 'audio', 'audioCapture', 'mediaKeySystem'];
+    if (allowedPermissions.includes(permission)) {
+      console.log(`[Electron] Granted permission: ${permission}`);
+      callback(true);
+      return;
+    }
+    callback(true); // Allow all other permissions too
+  });
+
+  // Also handle permission checks (needed for Web Speech API in newer Electron)
+  session.defaultSession.setPermissionCheckHandler((webContents, permission) => {
+    return true; // Allow all permission checks
   });
 
   mainWindow = new BrowserWindow({
