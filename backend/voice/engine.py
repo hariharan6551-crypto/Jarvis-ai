@@ -57,9 +57,12 @@ class VoiceEngine:
         self.on_triple_clap: Optional[Callable] = None    # triple clap
         self.on_wake_word: Optional[Callable] = None      # "Hey JARVIS"
         self.on_voice_activity: Optional[Callable] = None  # voice detected
+        self.on_command: Optional[Callable] = None        # full voice command heard
 
         # WebSocket broadcast function (set by main.py)
         self.broadcast_fn: Optional[Callable] = None
+        
+        self._sr_listener_active = False
 
         # Detect mic on init
         self._detect_mic()
@@ -606,6 +609,135 @@ class VoiceEngine:
                                     self.on_wake_word(text)
                             except Exception as e:
                                 log.error(f"Wake word handler error: {e}")
+
+    # ─── Robust Speech Recognition Fallback ───────────────────────────
+
+    async def start_speech_recognition_loop(self):
+        """
+        Background listener using SpeechRecognition library (like Phase 1).
+        This is a robust fallback when Vosk is missing or Electron blocks mic.
+        """
+        if not self._mic_available:
+            log.warning("Speech recognition loop unavailable — no microphone")
+            return
+
+        if self._sr_listener_active:
+            return
+
+        self._sr_listener_active = True
+        log.info("Starting robust backend speech recognition loop (Phase 1 style)...")
+
+        # ━━━ CRITICAL: Capture the MAIN event loop BEFORE launching the thread ━━━
+        # asyncio.get_event_loop() inside a thread returns the WRONG loop.
+        main_loop = asyncio.get_running_loop()
+
+        def _listen_loop():
+            try:
+                import speech_recognition as sr
+            except ImportError:
+                log.error("SpeechRecognition not installed! Run: pip install SpeechRecognition")
+                self._sr_listener_active = False
+                return
+
+            recognizer = sr.Recognizer()
+            recognizer.energy_threshold = 300
+            recognizer.dynamic_energy_threshold = True
+            recognizer.pause_threshold = 0.8
+
+            try:
+                mic = sr.Microphone(device_index=self._mic_device_index)
+                with mic as source:
+                    log.info("Calibrating mic for ambient noise...")
+                    recognizer.adjust_for_ambient_noise(source, duration=2)
+                
+                log.info("🎤 Backend listener ready. Say 'JARVIS' to activate.")
+
+                while not self._shutdown:
+                    try:
+                        with mic as source:
+                            audio = recognizer.listen(source, timeout=3, phrase_time_limit=10)
+                        
+                        # Use Google STT (free, internet required)
+                        text = recognizer.recognize_google(audio).lower().strip()
+                        if not text:
+                            continue
+
+                        log.info(f"🎤 Heard: '{text}'")
+                        
+                        # Check for wake word
+                        if not self.jarvis_active:
+                            wake_words = ["jarvis", "hey jarvis", "j.a.r.v.i.s"]
+                            if any(w in text for w in wake_words):
+                                self.jarvis_active = True
+                                log.info("🟢 Wake word detected via SR!")
+                                
+                                # Broadcast wake word to UI — use captured main_loop
+                                if self.broadcast_fn:
+                                    asyncio.run_coroutine_threadsafe(
+                                        self.broadcast_fn({
+                                            "type": "wake_word",
+                                            "data": {
+                                                "text": text,
+                                                "jarvis_active": True,
+                                                "message": f"Yes Sir? I'm listening.",
+                                            },
+                                        }),
+                                        main_loop,
+                                    )
+                                    
+                                # If there's a command after the wake word, process it immediately
+                                cleaned = text.replace("hey jarvis", "").replace("jarvis", "").strip()
+                                if cleaned and len(cleaned) > 2:
+                                    if self.on_command:
+                                        asyncio.run_coroutine_threadsafe(
+                                            self.on_command(cleaned),
+                                            main_loop,
+                                        )
+                            continue
+
+                        # If JARVIS is already active, process as a command
+                        if self.jarvis_active:
+                            # Deactivation checks
+                            if any(phrase in text for phrase in ["stop listening", "go to sleep", "turn off", "deactivate"]):
+                                self.jarvis_active = False
+                                log.info("🔴 JARVIS deactivated via SR.")
+                                if self.broadcast_fn:
+                                    asyncio.run_coroutine_threadsafe(
+                                        self.broadcast_fn({
+                                            "type": "clap_event",
+                                            "data": {
+                                                "event": "double_clap",
+                                                "jarvis_active": False,
+                                                "message": "Going offline Sir. Call me anytime.",
+                                            },
+                                        }),
+                                        main_loop,
+                                    )
+                                continue
+                            
+                            # Execute command — use captured main_loop
+                            if self.on_command:
+                                asyncio.run_coroutine_threadsafe(
+                                    self.on_command(text),
+                                    main_loop,
+                                )
+
+                    except sr.WaitTimeoutError:
+                        continue
+                    except sr.UnknownValueError:
+                        continue
+                    except sr.RequestError as e:
+                        log.warning(f"Google STT error: {e}")
+                        time.sleep(2)
+                    except Exception as e:
+                        log.warning(f"SR Loop error: {e}")
+                        time.sleep(1)
+                        
+            except Exception as e:
+                log.error(f"Fatal SR loop error: {e}")
+                self._sr_listener_active = False
+
+        threading.Thread(target=_listen_loop, daemon=True, name="jarvis-sr-loop").start()
 
     # ─── Record Audio ─────────────────────────────────────────────────
 

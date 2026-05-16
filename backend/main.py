@@ -11,6 +11,12 @@ import os
 import time
 import signal
 import base64
+import io
+
+# Fix Windows console encoding for special characters (like checkmarks)
+if sys.platform == 'win32':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 # Ensure backend dir is in path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -102,7 +108,7 @@ class ProfileRequest(BaseModel):
 @app.on_event("startup")
 async def startup():
     """Strict startup sequence with error isolation per module."""
-    global orchestrator, voice_engine, watchdog, health_monitor, system_monitor
+    global orchestrator, voice_engine, watchdog, health_monitor, system_monitor, livekit_service
 
     log.info("=" * 60)
     log.info("J.A.R.V.I.S BACKEND STARTING")
@@ -125,6 +131,53 @@ async def startup():
         voice_engine = VoiceEngine()
         # Wire broadcast function so clap/wake events reach frontend
         voice_engine.broadcast_fn = broadcast_to_clients
+        
+        # Wire command handler for robust backend voice recognition
+        async def handle_backend_voice_command(text: str):
+            if not orchestrator: return
+            log.info(f"Processing backend voice command: {text}")
+            
+            # Broadcast transcription to UI
+            await broadcast_to_clients({"type": "transcription", "data": {"text": text}})
+            await broadcast_to_clients({"type": "state_change", "data": {"state": "thinking"}})
+            
+            try:
+                result = await orchestrator.process_command(text)
+                response_text = result.get("ai_response", result.get("message", ""))
+                
+                # Send text response first
+                await broadcast_to_clients({
+                    "type": "response",
+                    "data": {
+                        "success": result.get("success", True),
+                        "response_text": response_text,
+                        "message": response_text,
+                        "intent": result.get("intent", ""),
+                        "duration_ms": result.get("duration_ms", 0),
+                        "plan_steps": result.get("plan_steps", 1),
+                        "audio": None,
+                    }
+                })
+                
+                # Generate and send TTS
+                if voice_engine and response_text:
+                    await broadcast_to_clients({"type": "state_change", "data": {"state": "speaking"}})
+                    audio_bytes = await voice_engine.speak(response_text)
+                    if audio_bytes:
+                        audio_b64 = base64.b64encode(audio_bytes).decode()
+                        await broadcast_to_clients({
+                            "type": "tts_audio",
+                            "data": {"audio": audio_b64}
+                        })
+            except Exception as e:
+                log.error(f"Backend voice execution error: {e}")
+            finally:
+                await broadcast_to_clients({"type": "state_change", "data": {
+                    "state": "listening" if (voice_engine and voice_engine.jarvis_active) else "idle"
+                }})
+                
+        voice_engine.on_command = handle_backend_voice_command
+
         if health_monitor:
             health_monitor.register_engine("voice", voice_engine)
         log.info("✓ Voice engine initialized")
@@ -140,7 +193,20 @@ async def startup():
             health_monitor.register_engine("ai", orchestrator.ai_provider)
             health_monitor.register_engine("automation", orchestrator.automation)
             health_monitor.register_engine("memory", orchestrator.memory)
-        log.info("✓ Orchestrator initialized (AI + automation + memory + services)")
+        
+        # Check if any AI providers are actually available
+        available_providers = orchestrator.ai_provider.get_available_providers()
+        if available_providers:
+            log.info(f"✓ Orchestrator initialized — AI providers: {available_providers}")
+        else:
+            log.warning("=" * 60)
+            log.warning("⚠ NO AI PROVIDERS CONFIGURED!")
+            log.warning("JARVIS needs an API key to think and respond.")
+            log.warning("Add your GEMINI_API_KEY to the .env file:")
+            log.warning(f"  File: {settings.APP_NAME} -> .env")
+            log.warning("  Get free key: https://aistudio.google.com/apikey")
+            log.warning("Basic commands (open apps, volume, etc.) still work.")
+            log.warning("=" * 60)
     except Exception as e:
         log.error(f"✗ Orchestrator failed: {e}")
 
@@ -198,12 +264,13 @@ async def startup():
     except Exception as e:
         log.error(f"✗ AI health check failed: {e}")
 
-    # Step 7: Mic retry loop OR auto-start clap detector
+    # Step 7: Mic retry loop OR auto-start clap detector + robust SR loop
     try:
         if voice_engine:
             if voice_engine._mic_available:
                 asyncio.create_task(voice_engine.start_clap_detector())
-                log.info("✓ Clap detector started (single=ON, double=OFF)")
+                asyncio.create_task(voice_engine.start_speech_recognition_loop())
+                log.info("✓ Clap detector & SR loop started")
             else:
                 asyncio.create_task(voice_engine.start_mic_retry_loop())
                 log.info("✓ Mic retry loop started")

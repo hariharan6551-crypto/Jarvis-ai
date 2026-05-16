@@ -28,6 +28,7 @@ class AIProvider:
         self._primary_provider = settings.DEFAULT_AI_PROVIDER
         self._health_check_interval = 60  # seconds
         self._max_consecutive_failures = 3
+        self._gemini_client = None  # Set if using new google-genai SDK
         self._init_providers()
         log.info(f"AI Provider initialized with default: {settings.DEFAULT_AI_PROVIDER}")
 
@@ -70,12 +71,26 @@ class AIProvider:
         # Gemini
         if settings.GEMINI_API_KEY and self._is_valid_key(settings.GEMINI_API_KEY):
             try:
-                import google.generativeai as genai
-                genai.configure(api_key=settings.GEMINI_API_KEY)
-                self.providers["gemini"] = genai
-                self._consecutive_failures["gemini"] = 0
-                self._health_status["gemini"] = "ok"
-                log.info("Gemini provider ready")
+                # Try new google-genai package first
+                try:
+                    from google import genai as google_genai
+                    self._gemini_client = google_genai.Client(api_key=settings.GEMINI_API_KEY)
+                    self.providers["gemini"] = "genai_new"
+                    self._consecutive_failures["gemini"] = 0
+                    self._health_status["gemini"] = "ok"
+                    log.info("Gemini provider ready (google-genai)")
+                except ImportError:
+                    # Fall back to deprecated google-generativeai
+                    import warnings
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", FutureWarning)
+                        import google.generativeai as genai
+                    genai.configure(api_key=settings.GEMINI_API_KEY)
+                    self.providers["gemini"] = genai
+                    self._gemini_client = None
+                    self._consecutive_failures["gemini"] = 0
+                    self._health_status["gemini"] = "ok"
+                    log.info("Gemini provider ready (google-generativeai)")
             except Exception as e:
                 log.warning(f"Gemini init failed: {e}")
                 self._health_status["gemini"] = "failed"
@@ -245,7 +260,13 @@ class AIProvider:
                 provider = list(self.providers.keys())[0]
                 log.warning(f"Using first available provider: {provider}")
             else:
-                return "I apologize, but no AI providers are currently configured. Please add your GEMINI_API_KEY in the .env file."
+                log.error("No AI providers configured! Set GEMINI_API_KEY in .env file.")
+                return (
+                    f"Sir, I don't have an AI brain configured yet. "
+                    f"Please add your GEMINI_API_KEY to the .env file in the Jarvis folder. "
+                    f"Get a free key at https://aistudio.google.com/apikey — "
+                    f"Basic commands like 'open chrome', 'volume up', 'take screenshot' still work without AI."
+                )
 
         try:
             async def _do_chat():
@@ -384,9 +405,34 @@ class AIProvider:
     # ─── Gemini ───────────────────────────────────────────────────────
 
     async def _chat_gemini(self, message, system_prompt, model, history):
+        model_name = model or "gemini-2.0-flash"
+
+        # New google-genai Client API
+        if hasattr(self, '_gemini_client') and self._gemini_client:
+            from google.genai import types
+            contents = []
+            if history:
+                for h in history[-10:]:
+                    role = "user" if h["role"] == "user" else "model"
+                    contents.append(types.Content(role=role, parts=[types.Part(text=h["content"])]))
+            contents.append(types.Content(role="user", parts=[types.Part(text=message)]))
+
+            config = types.GenerateContentConfig(
+                system_instruction=system_prompt or "You are J.A.R.V.I.S, an advanced AI assistant.",
+                max_output_tokens=2048,
+            )
+            response = await asyncio.to_thread(
+                self._gemini_client.models.generate_content,
+                model=model_name,
+                contents=contents,
+                config=config,
+            )
+            return response.text
+
+        # Legacy google.generativeai API
         genai = self.providers["gemini"]
         gen_model = genai.GenerativeModel(
-            model_name=model or "gemini-1.5-flash",
+            model_name=model_name,
             system_instruction=system_prompt or "You are J.A.R.V.I.S, an advanced AI assistant.",
         )
         chat = gen_model.start_chat(history=self._build_gemini_history(history))
@@ -394,9 +440,35 @@ class AIProvider:
         return response.text
 
     async def _stream_gemini(self, message, system_prompt, model, history):
+        model_name = model or "gemini-2.0-flash"
+
+        # New google-genai Client API
+        if hasattr(self, '_gemini_client') and self._gemini_client:
+            from google.genai import types
+            contents = []
+            if history:
+                for h in history[-10:]:
+                    role = "user" if h["role"] == "user" else "model"
+                    contents.append(types.Content(role=role, parts=[types.Part(text=h["content"])]))
+            contents.append(types.Content(role="user", parts=[types.Part(text=message)]))
+
+            config = types.GenerateContentConfig(
+                system_instruction=system_prompt or "You are J.A.R.V.I.S, an advanced AI assistant.",
+                max_output_tokens=2048,
+            )
+            response = await asyncio.to_thread(
+                self._gemini_client.models.generate_content,
+                model=model_name,
+                contents=contents,
+                config=config,
+            )
+            yield response.text
+            return
+
+        # Legacy google.generativeai API
         genai = self.providers["gemini"]
         gen_model = genai.GenerativeModel(
-            model_name=model or "gemini-1.5-flash",
+            model_name=model_name,
             system_instruction=system_prompt or "You are J.A.R.V.I.S, an advanced AI assistant.",
         )
         chat = gen_model.start_chat(history=self._build_gemini_history(history))

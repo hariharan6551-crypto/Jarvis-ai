@@ -313,9 +313,16 @@ const useStore = create((set, get) => ({
       audio.onended = () => {
         URL.revokeObjectURL(url);
         // Delay clearing isSpeaking so mic doesn't pick up tail-end
-        setTimeout(() => set({ aiState: 'idle', isSpeaking: false }), 500);
+        setTimeout(() => {
+          const nextState = get().jarvisActive ? 'listening' : 'idle';
+          set({ aiState: nextState, isSpeaking: false });
+        }, 600);
       };
-      audio.play().catch(() => set({ aiState: 'idle', isSpeaking: false }));
+      audio.onerror = () => {
+        const nextState = get().jarvisActive ? 'listening' : 'idle';
+        set({ aiState: nextState, isSpeaking: false });
+      };
+      audio.play().catch(() => set({ aiState: get().jarvisActive ? 'listening' : 'idle', isSpeaking: false }));
     } catch (e) { console.error('Audio play error', e); }
   },
 }));

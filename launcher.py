@@ -146,13 +146,22 @@ def check_npm_installed() -> bool:
 
 def check_backend_deps() -> bool:
     """Check critical Python packages."""
-    required = ["fastapi", "uvicorn", "pydantic", "loguru", "psutil"]
+    required = ["fastapi", "uvicorn", "pydantic", "loguru", "psutil", "edge_tts"]
+    voice_deps = ["speech_recognition", "sounddevice"]
     missing = []
+    missing_voice = []
+
     for pkg in required:
         try:
             __import__(pkg)
         except ImportError:
             missing.append(pkg)
+
+    for pkg in voice_deps:
+        try:
+            __import__(pkg)
+        except ImportError:
+            missing_voice.append(pkg)
 
     if missing:
         print(f"  {RED}✗{RESET} Missing packages: {', '.join(missing)}")
@@ -160,7 +169,12 @@ def check_backend_deps() -> bool:
         return False
     else:
         print(f"  {GREEN}✓{RESET} All required Python packages installed")
-        return True
+
+    if missing_voice:
+        print(f"  {YELLOW}⚠{RESET} Missing voice packages: {', '.join(missing_voice)}")
+        print(f"      Voice commands may not work. Run: pip install SpeechRecognition sounddevice")
+
+    return True
 
 
 def launch():

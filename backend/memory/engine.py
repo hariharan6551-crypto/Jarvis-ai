@@ -77,20 +77,25 @@ class MemoryEngine:
         """Initialize ChromaDB for vector memory."""
         try:
             import chromadb
-            from chromadb.config import Settings as ChromaSettings
 
-            self.chroma_client = chromadb.Client(
-                ChromaSettings(
-                    chroma_db_impl="duckdb+parquet",
-                    persist_directory=settings.CHROMA_DB_PATH,
-                    anonymized_telemetry=False,
+            # Use modern PersistentClient API (compatible with chromadb >=0.4)
+            try:
+                self.chroma_client = chromadb.PersistentClient(
+                    path=settings.CHROMA_DB_PATH,
                 )
-            )
+            except (TypeError, AttributeError):
+                # Fallback for older chromadb versions
+                self.chroma_client = chromadb.Client()
+
             self.memory_collection = self.chroma_client.get_or_create_collection(
                 name="jarvis_memory",
                 metadata={"hnsw:space": "cosine"},
             )
             log.debug("ChromaDB initialized")
+        except ImportError:
+            log.warning("ChromaDB not installed — vector memory unavailable")
+            self.chroma_client = None
+            self.memory_collection = None
         except Exception as e:
             log.warning(f"ChromaDB initialization failed (non-critical): {e}")
             self.chroma_client = None

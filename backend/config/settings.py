@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: Optional[str] = None
     OLLAMA_HOST: str = "http://localhost:11434"
     DEFAULT_AI_PROVIDER: str = "gemini"
-    DEFAULT_AI_MODEL: str = "gemini-1.5-flash"
+    DEFAULT_AI_MODEL: str = "gemini-2.0-flash"
 
     # Weather
     OPENWEATHER_API_KEY: Optional[str] = None
@@ -54,7 +54,7 @@ class Settings(BaseSettings):
     TTS_PROVIDER: str = "edge"  # edge, elevenlabs, pyttsx3
     ELEVENLABS_API_KEY: Optional[str] = None
     ELEVENLABS_VOICE_ID: str = "pNInz6obpgDQGcFmaJgB"  # Adam
-    EDGE_TTS_VOICE: str = "en-US-GuyNeural"
+    EDGE_TTS_VOICE: str = "en-US-ChristopherNeural"
     WAKE_WORD: str = "jarvis"
 
     # Memory
