@@ -103,17 +103,47 @@ class AutomationEngine:
         "eventvwr.msc": "eventvwr.msc",
     }
 
-    # UWP / Microsoft Store apps — opened via shell:AppsFolder
-    UWP_APPS = {
-        "whatsapp": "5319275A.WhatsAppDesktop_cv1g1gnamgfnp!App",
-        "instagram": "Facebook.InstagramBeta_8xx8rvfyw5nnt!App",
-        "spotify": "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify",
-        "telegram": "TelegramMessengerLLP.TelegramDesktop_t4vj0pshhgkwm!Telegram",
-        "discord": "Discord_gp1ehxhx8e18t!Discord",
-        "canva": "Canva.Canva_s98csk2xpybfj!App",
-        "teams": "MicrosoftTeams_8wekyb3d8bbwe!MSTeams",
-        "xbox": "Microsoft.XboxApp_8wekyb3d8bbwe!Microsoft.XboxApp",
+    # UWP app search keywords → what to search in PackageFamilyName
+    UWP_SEARCH_KEYS = {
+        "whatsapp": "WhatsApp",
+        "instagram": "Instagram",
+        "spotify": "Spotify",
+        "telegram": "Telegram",
+        "discord": "Discord",
+        "canva": "Canva",
+        "teams": "MicrosoftTeams",
+        "xbox": "XboxApp",
+        "netflix": "Netflix",
+        "prime video": "AmazonVideo",
+        "twitter": "Twitter",
+        "tiktok": "TikTok",
+        "messenger": "Messenger",
     }
+
+    # Cache for discovered UWP apps
+    _uwp_cache: dict = {}
+
+    def _discover_uwp_app(self, search_key: str) -> str:
+        """Dynamically discover a UWP app's launch ID via PowerShell."""
+        if search_key in self._uwp_cache:
+            return self._uwp_cache[search_key]
+        try:
+            # Get PackageFamilyName
+            ps_cmd = f'Get-AppxPackage *{search_key}* | Select-Object -First 1 -ExpandProperty PackageFamilyName'
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", ps_cmd],
+                capture_output=True, text=True, timeout=5
+            )
+            pfn = result.stdout.strip()
+            if pfn:
+                # UWP apps use PackageFamilyName!App as the launch ID
+                launch_id = f"{pfn}!App"
+                self._uwp_cache[search_key] = launch_id
+                log.info(f"Discovered UWP app: {search_key} → {launch_id}")
+                return launch_id
+        except Exception as e:
+            log.debug(f"UWP discovery failed for {search_key}: {e}")
+        return ""
 
     async def open_application(self, app_name: str) -> dict:
         """Open any application — supports win32 apps, UWP/Store apps, ms-settings, .msc, and URLs."""
@@ -125,26 +155,26 @@ class AutomationEngine:
                 if app_lower.startswith("ms-settings"):
                     subprocess.Popen(["start", app_lower], shell=True)
                     label = app_lower.replace("ms-settings:", "").replace("-", " ").title() or "Settings"
-                    return {"success": True, "message": f"Opened {label} settings"}
+                    return {"success": True, "message": f"Opened {label} settings, Sir"}
 
                 # 2. MMC snap-ins (.msc files)
                 if app_lower.endswith(".msc"):
                     subprocess.Popen(["mmc", app_lower], shell=True)
-                    return {"success": True, "message": f"Opened {app_lower}"}
+                    return {"success": True, "message": f"Opened {app_lower}, Sir"}
 
                 # 3. Explorer special folders
                 cmd = self.APP_PATHS.get(app_lower, None)
                 if cmd and cmd.startswith("explorer shell:"):
                     subprocess.Popen(cmd, shell=True)
-                    return {"success": True, "message": f"Opened {app_name}"}
+                    return {"success": True, "message": f"Opened {app_name}, Sir"}
 
-                # 4. UWP / Store apps
-                if app_lower in self.UWP_APPS:
-                    uwp_id = self.UWP_APPS[app_lower]
-                    subprocess.Popen(
-                        ["explorer.exe", f"shell:AppsFolder\\{uwp_id}"],
-                    )
-                    return {"success": True, "message": f"Opened {app_name}"}
+                # 4. UWP / Store apps (dynamic discovery)
+                uwp_key = self.UWP_SEARCH_KEYS.get(app_lower, None)
+                if uwp_key:
+                    launch_id = self._discover_uwp_app(uwp_key)
+                    if launch_id:
+                        subprocess.Popen(["explorer.exe", f"shell:AppsFolder\\{launch_id}"])
+                        return {"success": True, "message": f"Opened {app_name}, Sir"}
 
                 # 5. Known win32 apps
                 if cmd:
@@ -152,16 +182,21 @@ class AutomationEngine:
                         subprocess.Popen(["start", cmd], shell=True)
                     else:
                         subprocess.Popen(["start", "", cmd], shell=True)
-                    return {"success": True, "message": f"Opened {app_name}"}
+                    return {"success": True, "message": f"Opened {app_name}, Sir"}
 
-                # 6. Fallback: try Windows search (start shell command)
-                # This handles apps not in our list by using Windows' own search
+                # 6. Try as a UWP app by name (even if not in our search keys)
+                launch_id = self._discover_uwp_app(app_lower)
+                if launch_id:
+                    subprocess.Popen(["explorer.exe", f"shell:AppsFolder\\{launch_id}"])
+                    return {"success": True, "message": f"Opened {app_name}, Sir"}
+
+                # 7. Ultimate fallback: try 'start' command (Windows will search PATH)
                 subprocess.Popen(["start", "", app_lower], shell=True)
-                return {"success": True, "message": f"Opened {app_name}"}
+                return {"success": True, "message": f"Opened {app_name}, Sir"}
 
             except FileNotFoundError:
                 log.error(f"Application not found: {app_name}")
-                return {"success": False, "message": f"Application '{app_name}' not found on this system"}
+                return {"success": False, "message": f"Application '{app_name}' not found on this system, Sir"}
             except Exception as e:
                 log.error(f"Failed to open {app_name}: {e}")
                 return {"success": False, "message": f"Failed to open {app_name}: {str(e)}"}

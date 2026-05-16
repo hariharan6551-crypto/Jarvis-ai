@@ -62,11 +62,11 @@ APP_ALIASES = {
     "cursor": "cursor", "android studio": "studio64",
 
     # Microsoft Office
-    "word": "winword", "microsoft word": "winword",
-    "excel": "excel", "microsoft excel": "excel",
-    "powerpoint": "powerpnt", "ppt": "powerpnt",
-    "outlook": "outlook", "microsoft outlook": "outlook",
-    "onenote": "onenote", "access": "msaccess",
+    "word": "winword", "microsoft word": "winword", "ms word": "winword",
+    "excel": "excel", "microsoft excel": "excel", "ms excel": "excel",
+    "powerpoint": "powerpnt", "ppt": "powerpnt", "ms powerpoint": "powerpnt",
+    "outlook": "outlook", "microsoft outlook": "outlook", "ms outlook": "outlook",
+    "onenote": "onenote", "access": "msaccess", "ms access": "msaccess",
 
     # Communication & Social
     "whatsapp": "whatsapp", "whats app": "whatsapp",

@@ -198,15 +198,18 @@ class TaskPlanner:
         # ══════════════════════════════════════════════════════════════
 
         # ── Open app ──
-        open_match = re.match(r"(?:open|launch|start|run)\s+(.+)", text_lower)
+        open_match = re.match(r"(?:please\s+)?(?:open|launch|start|run)\s+(?:the\s+|my\s+|a\s+)?(.+)", text_lower)
         if open_match:
             app = open_match.group(1).strip()
+            # Remove trailing words like "app", "application", "please"
+            app = re.sub(r"\s+(?:app|application|please|for me)$", "", app)
             return [{"type": STEP_OPEN_APP, "param": app}]
 
         # ── Close app ──
-        close_match = re.match(r"(?:close|quit|exit|kill|terminate)\s+(.+)", text_lower)
+        close_match = re.match(r"(?:please\s+)?(?:close|quit|exit|kill|terminate)\s+(?:the\s+|my\s+)?(.+)", text_lower)
         if close_match:
             app = close_match.group(1).strip()
+            app = re.sub(r"\s+(?:app|application|please|for me)$", "", app)
             return [{"type": STEP_CLOSE_APP, "param": app}]
 
         # ── YouTube search ──
@@ -338,7 +341,7 @@ class TaskPlanner:
             from datetime import datetime
             now = datetime.now().strftime("%I:%M %p")
             return [{"type": STEP_SPEAK, "param": f"The current time is {now}"}]
-        if re.search(r"what\s*(?:'s|\s+is)\s+(?:the\s+)?(?:date|day)|today", text_lower):
+        if re.search(r"what\s*(?:'s|\s+is)\s+(?:the\s+)?(?:date|day)|today(?:'s)?\s+date|what\s+day", text_lower):
             from datetime import datetime
             today = datetime.now().strftime("%A, %B %d, %Y")
             return [{"type": STEP_SPEAK, "param": f"Today is {today}"}]
@@ -359,33 +362,19 @@ class TaskPlanner:
 
     # ─── AI-Powered Planning ──────────────────────────────────────────
 
-    PLANNING_PROMPT = """You are J.A.R.V.I.S, a Windows PC assistant. Decompose the user's command into executable steps.
+    PLANNING_PROMPT = """Decompose the user command into a JSON array of steps. Output ONLY valid JSON, nothing else.
 
-Available step types:
-- open_app: Open an application (param: app name like "chrome", "notepad", "vscode")
-- close_app: Close an application (param: app name)
-- browser_profile: Open Chrome with a specific profile (param: profile name)
-- navigate_url: Navigate to URL (param: full URL)
-- search_web: Search Google (param: search query)
-- search_youtube: Search YouTube (param: search query)
-- click_text: Click on screen text using OCR (param: text to click)
-- type_text: Type text (param: text to type)
-- press_key: Press keyboard shortcut (param: key combo like "ctrl+c")
-- wait: Wait seconds (param: number of seconds)
-- screenshot: Take screenshot (param: null)
-- read_screen: Read screen text via OCR (param: null)
-- system_cmd: System command (param: info/shutdown/restart/lock/sleep)
-- volume: Volume control (param: up/down/mute/set:50)
-- brightness: Brightness control (param: up/down)
-- media: Media control (param: play/pause/next/prev)
-- switch_window: Switch to window (param: window title)
-- speak: Say something (param: text to speak)
-- conversation: AI conversation response (param: topic)
+Step types: open_app, close_app, browser_profile, navigate_url, search_web, search_youtube,
+click_text, type_text, press_key, wait, screenshot, read_screen, system_cmd, volume,
+brightness, media, switch_window, speak, conversation
 
-Output ONLY a JSON array of steps. Example:
-[{"type": "open_app", "param": "chrome"}, {"type": "wait", "param": "2"}, {"type": "search_web", "param": "python tutorials"}]
+Examples:
+"open chrome and search for AI" → [{"type":"open_app","param":"chrome"},{"type":"wait","param":"2"},{"type":"search_web","param":"AI"}]
+"take a screenshot" → [{"type":"screenshot","param":null}]
+"tell me about Mars" → [{"type":"conversation","param":"tell me about Mars"}]
 
-User command: {command}"""
+User command: {command}
+JSON:"""
 
     async def plan(self, command: str) -> list:
         """Generate an execution plan for a command."""
@@ -418,15 +407,21 @@ User command: {command}"""
             prompt = self.PLANNING_PROMPT.format(command=command)
             response = await self.ai_provider.chat(
                 message=prompt,
-                system_prompt="You output only valid JSON arrays of step objects. No explanation.",
+                system_prompt="Output ONLY a valid JSON array. No text, no explanation, no markdown.",
             )
 
-            # Parse JSON from response
+            # Robust JSON extraction
             response = response.strip()
             # Remove markdown code blocks if present
-            if response.startswith("```"):
-                response = re.sub(r"```(?:json)?\s*", "", response)
-                response = re.sub(r"\s*```$", "", response)
+            response = re.sub(r"```(?:json)?\s*", "", response)
+            response = re.sub(r"\s*```", "", response)
+            response = response.strip()
+
+            # Find the JSON array in the response (it might have extra text)
+            bracket_start = response.find('[')
+            bracket_end = response.rfind(']')
+            if bracket_start != -1 and bracket_end != -1 and bracket_end > bracket_start:
+                response = response[bracket_start:bracket_end + 1]
 
             plan = json.loads(response)
             if isinstance(plan, list) and all(isinstance(s, dict) and "type" in s for s in plan):
@@ -435,7 +430,7 @@ User command: {command}"""
             log.warning(f"Invalid AI plan format: {response[:200]}")
             return None
         except json.JSONDecodeError as e:
-            log.error(f"AI plan JSON parse error: {e}")
+            log.error(f"AI plan JSON parse error: {e} — raw: {response[:100]}")
             return None
         except Exception as e:
             log.error(f"AI plan generation failed: {e}")
