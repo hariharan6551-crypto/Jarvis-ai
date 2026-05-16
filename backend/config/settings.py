@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: Optional[str] = None
     OLLAMA_HOST: str = "http://localhost:11434"
     DEFAULT_AI_PROVIDER: str = "gemini"
-    DEFAULT_AI_MODEL: str = "gemini-2.0-flash"
+    DEFAULT_AI_MODEL: str = "gemini-2.5-flash"
 
     # Weather
     OPENWEATHER_API_KEY: Optional[str] = None

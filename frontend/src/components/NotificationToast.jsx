@@ -20,7 +20,7 @@ export default function NotificationToast() {
 
   useEffect(() => {
     _showToast = (toast) => {
-      setToasts(prev => [...prev.slice(-4), toast]);
+      setToasts(prev => [...prev.slice(-1), toast]);
       setTimeout(() => {
         setToasts(prev => prev.filter(t => t.id !== toast.id));
       }, toast.duration);

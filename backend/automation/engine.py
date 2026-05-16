@@ -73,47 +73,92 @@ class AutomationEngine:
     # ─── Application Management ───────────────────────────────────────
 
     APP_PATHS = {
-        "chrome": "chrome",
-        "firefox": "firefox",
-        "msedge": "msedge",
-        "code": "code",
-        "notepad": "notepad",
-        "calc": "calc",
-        "mspaint": "mspaint",
+        # Browsers
+        "chrome": "chrome", "firefox": "firefox", "msedge": "msedge",
+        "brave": "brave", "opera": "opera", "arc": "arc",
+        # Editors
+        "code": "code", "devenv": "devenv", "sublime_text": "sublime_text",
+        "cursor": "cursor", "studio64": "studio64",
+        # Office
+        "notepad": "notepad", "notepad++": "notepad++",
+        "calc": "calc", "mspaint": "mspaint",
+        "winword": "winword", "excel": "excel", "powerpnt": "powerpnt",
+        "outlook": "outlook", "onenote": "onenote", "msaccess": "msaccess",
+        # File Explorer
         "explorer": "explorer",
-        "explorer_downloads": r"explorer shell:Downloads",
-        "explorer_documents": r"explorer shell:Documents",
-        "explorer_desktop": r"explorer shell:Desktop",
-        "cmd": "cmd",
-        "powershell": "powershell",
-        "wt": "wt",
-        "taskmgr": "taskmgr",
-        "ms-settings:": "ms-settings:",
-        "control": "control",
+        "explorer_downloads": "explorer shell:Downloads",
+        "explorer_documents": "explorer shell:Documents",
+        "explorer_desktop": "explorer shell:Desktop",
+        "explorer_recycle": "explorer shell:RecycleBinFolder",
+        # Terminal
+        "cmd": "cmd", "powershell": "powershell", "wt": "wt",
+        # System tools
+        "taskmgr": "taskmgr", "control": "control",
+        "regedit": "regedit", "resmon": "resmon",
+        "msinfo32": "msinfo32", "charmap": "charmap",
         "snippingtool": "snippingtool",
-        "winword": "winword",
-        "excel": "excel",
-        "powerpnt": "powerpnt",
-        "outlook": "outlook",
+        # MMC snap-ins
+        "devmgmt.msc": "devmgmt.msc",
+        "diskmgmt.msc": "diskmgmt.msc",
+        "eventvwr.msc": "eventvwr.msc",
+    }
+
+    # UWP / Microsoft Store apps — opened via shell:AppsFolder
+    UWP_APPS = {
+        "whatsapp": "5319275A.WhatsAppDesktop_cv1g1gnamgfnp!App",
+        "instagram": "Facebook.InstagramBeta_8xx8rvfyw5nnt!App",
+        "spotify": "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify",
+        "telegram": "TelegramMessengerLLP.TelegramDesktop_t4vj0pshhgkwm!Telegram",
+        "discord": "Discord_gp1ehxhx8e18t!Discord",
+        "canva": "Canva.Canva_s98csk2xpybfj!App",
+        "teams": "MicrosoftTeams_8wekyb3d8bbwe!MSTeams",
+        "xbox": "Microsoft.XboxApp_8wekyb3d8bbwe!Microsoft.XboxApp",
     }
 
     async def open_application(self, app_name: str) -> dict:
-        """Open an application by name."""
+        """Open any application — supports win32 apps, UWP/Store apps, ms-settings, .msc, and URLs."""
         with self._timed_action(f"open_app({app_name})"):
             try:
                 app_lower = app_name.lower().strip()
-                cmd = self.APP_PATHS.get(app_lower, app_lower)
 
-                if cmd.startswith("ms-settings"):
-                    subprocess.Popen(["start", cmd], shell=True)
-                elif cmd.startswith("explorer shell:"):
+                # 1. Windows Settings (ms-settings: URI)
+                if app_lower.startswith("ms-settings"):
+                    subprocess.Popen(["start", app_lower], shell=True)
+                    label = app_lower.replace("ms-settings:", "").replace("-", " ").title() or "Settings"
+                    return {"success": True, "message": f"Opened {label} settings"}
+
+                # 2. MMC snap-ins (.msc files)
+                if app_lower.endswith(".msc"):
+                    subprocess.Popen(["mmc", app_lower], shell=True)
+                    return {"success": True, "message": f"Opened {app_lower}"}
+
+                # 3. Explorer special folders
+                cmd = self.APP_PATHS.get(app_lower, None)
+                if cmd and cmd.startswith("explorer shell:"):
                     subprocess.Popen(cmd, shell=True)
-                elif app_lower in ("chrome", "firefox", "msedge"):
-                    subprocess.Popen(["start", cmd], shell=True)
-                else:
-                    subprocess.Popen(["start", "", cmd], shell=True)
+                    return {"success": True, "message": f"Opened {app_name}"}
 
+                # 4. UWP / Store apps
+                if app_lower in self.UWP_APPS:
+                    uwp_id = self.UWP_APPS[app_lower]
+                    subprocess.Popen(
+                        ["explorer.exe", f"shell:AppsFolder\\{uwp_id}"],
+                    )
+                    return {"success": True, "message": f"Opened {app_name}"}
+
+                # 5. Known win32 apps
+                if cmd:
+                    if app_lower in ("chrome", "firefox", "msedge", "brave", "opera"):
+                        subprocess.Popen(["start", cmd], shell=True)
+                    else:
+                        subprocess.Popen(["start", "", cmd], shell=True)
+                    return {"success": True, "message": f"Opened {app_name}"}
+
+                # 6. Fallback: try Windows search (start shell command)
+                # This handles apps not in our list by using Windows' own search
+                subprocess.Popen(["start", "", app_lower], shell=True)
                 return {"success": True, "message": f"Opened {app_name}"}
+
             except FileNotFoundError:
                 log.error(f"Application not found: {app_name}")
                 return {"success": False, "message": f"Application '{app_name}' not found on this system"}

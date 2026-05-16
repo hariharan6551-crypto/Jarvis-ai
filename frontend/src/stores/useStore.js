@@ -4,8 +4,8 @@ const useStore = create((set, get) => ({
   // Connection
   ws: null,
   connected: false,
-  backendUrl: 'ws://127.0.0.1:8765/ws',
-  apiUrl: 'http://127.0.0.1:8765',
+  backendUrl: 'ws://127.0.0.1:8766/ws',
+  apiUrl: 'http://127.0.0.1:8766',
 
   // UI State
   currentPage: 'home',

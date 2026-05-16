@@ -1,11 +1,12 @@
 """
 J.A.R.V.I.S AI Provider Manager
-Supports OpenAI, Anthropic Claude, Google Gemini, and Ollama.
+Supports Google Gemini (new SDK), OpenAI, Anthropic Claude, and Ollama.
 Features: retry with exponential backoff, auto-fallback, health pings.
 """
 
 import asyncio
 import time
+import warnings
 from typing import AsyncGenerator, Optional
 from core.logger import get_logger
 from config.settings import settings
@@ -28,7 +29,7 @@ class AIProvider:
         self._primary_provider = settings.DEFAULT_AI_PROVIDER
         self._health_check_interval = 60  # seconds
         self._max_consecutive_failures = 3
-        self._gemini_client = None  # Set if using new google-genai SDK
+        self._gemini_client = None  # google-genai Client
         self._init_providers()
         log.info(f"AI Provider initialized with default: {settings.DEFAULT_AI_PROVIDER}")
 
@@ -40,73 +41,78 @@ class AIProvider:
 
     def _init_providers(self):
         """Initialize available AI providers."""
-        # OpenAI
+        # ─── Gemini (Primary — free tier available) ───────────────────
+        if settings.GEMINI_API_KEY and self._is_valid_key(settings.GEMINI_API_KEY):
+            try:
+                from google import genai
+                self._gemini_client = genai.Client(api_key=settings.GEMINI_API_KEY)
+                self.providers["gemini"] = "genai"
+                self._consecutive_failures["gemini"] = 0
+                self._health_status["gemini"] = "ok"
+                log.info("✓ Gemini provider ready (google-genai SDK)")
+            except ImportError:
+                # Fall back to deprecated google-generativeai
+                try:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", FutureWarning)
+                        import google.generativeai as genai_legacy
+                    genai_legacy.configure(api_key=settings.GEMINI_API_KEY)
+                    self.providers["gemini"] = genai_legacy
+                    self._consecutive_failures["gemini"] = 0
+                    self._health_status["gemini"] = "ok"
+                    log.info("✓ Gemini provider ready (legacy SDK)")
+                except Exception as e:
+                    log.warning(f"Gemini init failed: {e}")
+                    self._health_status["gemini"] = "failed"
+            except Exception as e:
+                log.warning(f"Gemini init failed: {e}")
+                self._health_status["gemini"] = "failed"
+        else:
+            if settings.GEMINI_API_KEY:
+                log.warning("Gemini API key is a placeholder — skipping")
+            else:
+                log.warning("No GEMINI_API_KEY set in .env — Gemini unavailable")
+
+        # ─── OpenAI ───────────────────────────────────────────────────
         if settings.OPENAI_API_KEY and self._is_valid_key(settings.OPENAI_API_KEY):
             try:
                 from openai import AsyncOpenAI
                 self.providers["openai"] = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
                 self._consecutive_failures["openai"] = 0
                 self._health_status["openai"] = "ok"
-                log.info("OpenAI provider ready")
+                log.info("✓ OpenAI provider ready")
             except Exception as e:
                 log.warning(f"OpenAI init failed: {e}")
                 self._health_status["openai"] = "failed"
-        elif settings.OPENAI_API_KEY:
-            log.warning("OpenAI API key is a placeholder — skipping")
 
-        # Anthropic
+        # ─── Anthropic ────────────────────────────────────────────────
         if settings.ANTHROPIC_API_KEY and self._is_valid_key(settings.ANTHROPIC_API_KEY):
             try:
                 from anthropic import AsyncAnthropic
                 self.providers["anthropic"] = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
                 self._consecutive_failures["anthropic"] = 0
                 self._health_status["anthropic"] = "ok"
-                log.info("Anthropic provider ready")
+                log.info("✓ Anthropic provider ready")
             except Exception as e:
                 log.warning(f"Anthropic init failed: {e}")
                 self._health_status["anthropic"] = "failed"
-        elif settings.ANTHROPIC_API_KEY:
-            log.warning("Anthropic API key is a placeholder — skipping")
 
-        # Gemini
-        if settings.GEMINI_API_KEY and self._is_valid_key(settings.GEMINI_API_KEY):
-            try:
-                # Try new google-genai package first
-                try:
-                    from google import genai as google_genai
-                    self._gemini_client = google_genai.Client(api_key=settings.GEMINI_API_KEY)
-                    self.providers["gemini"] = "genai_new"
-                    self._consecutive_failures["gemini"] = 0
-                    self._health_status["gemini"] = "ok"
-                    log.info("Gemini provider ready (google-genai)")
-                except ImportError:
-                    # Fall back to deprecated google-generativeai
-                    import warnings
-                    with warnings.catch_warnings():
-                        warnings.simplefilter("ignore", FutureWarning)
-                        import google.generativeai as genai
-                    genai.configure(api_key=settings.GEMINI_API_KEY)
-                    self.providers["gemini"] = genai
-                    self._gemini_client = None
-                    self._consecutive_failures["gemini"] = 0
-                    self._health_status["gemini"] = "ok"
-                    log.info("Gemini provider ready (google-generativeai)")
-            except Exception as e:
-                log.warning(f"Gemini init failed: {e}")
-                self._health_status["gemini"] = "failed"
-        elif settings.GEMINI_API_KEY:
-            log.warning("Gemini API key is a placeholder ('your_key_here') — skipping. Please set a real key in .env")
-
-        # Ollama (local, always available)
+        # ─── Ollama (local, free, no API key needed) ──────────────────
         try:
-            import ollama
-            self.providers["ollama"] = ollama
-            self._consecutive_failures["ollama"] = 0
-            self._health_status["ollama"] = "ok"
-            log.info("Ollama provider ready")
-        except Exception as e:
-            log.debug(f"Ollama not available: {e}")
-            self._health_status["ollama"] = "failed"
+            import httpx
+            # Quick check if Ollama is running
+            try:
+                resp = httpx.get(f"{settings.OLLAMA_HOST}/api/tags", timeout=2)
+                if resp.status_code == 200:
+                    import ollama
+                    self.providers["ollama"] = ollama
+                    self._consecutive_failures["ollama"] = 0
+                    self._health_status["ollama"] = "ok"
+                    log.info("✓ Ollama provider ready (local)")
+            except (httpx.ConnectError, httpx.TimeoutException):
+                log.debug("Ollama not running locally")
+        except ImportError:
+            log.debug("httpx/ollama not installed")
 
     def get_available_providers(self) -> list:
         """Return list of available provider names."""
@@ -120,7 +126,7 @@ class AIProvider:
                 "failures": self._consecutive_failures.get(name, 0),
                 "available": name in self.providers,
             }
-            for name in ["openai", "anthropic", "gemini", "ollama"]
+            for name in ["gemini", "openai", "anthropic", "ollama"]
         }
 
     # ─── Retry Logic ──────────────────────────────────────────────────
@@ -206,10 +212,11 @@ class AIProvider:
                         self._consecutive_failures[name] = 0
 
                     elif name == "gemini":
-                        genai = self.providers["gemini"]
-                        await asyncio.to_thread(
-                            lambda: genai.list_models()
-                        )
+                        # Quick health check for Gemini
+                        if self._gemini_client:
+                            await asyncio.to_thread(
+                                lambda: self._gemini_client.models.list()
+                            )
                         self._health_status[name] = "ok"
                         self._consecutive_failures[name] = 0
 
@@ -260,12 +267,12 @@ class AIProvider:
                 provider = list(self.providers.keys())[0]
                 log.warning(f"Using first available provider: {provider}")
             else:
-                log.error("No AI providers configured! Set GEMINI_API_KEY in .env file.")
+                log.error("No AI providers configured!")
                 return (
-                    f"Sir, I don't have an AI brain configured yet. "
-                    f"Please add your GEMINI_API_KEY to the .env file in the Jarvis folder. "
-                    f"Get a free key at https://aistudio.google.com/apikey — "
-                    f"Basic commands like 'open chrome', 'volume up', 'take screenshot' still work without AI."
+                    "Sir, I don't have an AI brain configured yet. "
+                    "Please add your GEMINI_API_KEY to the .env file. "
+                    "Get a free key at https://aistudio.google.com/apikey — "
+                    "Basic commands like 'open chrome', 'volume up', 'take screenshot' still work."
                 )
 
         try:
@@ -402,13 +409,13 @@ class AIProvider:
             async for text in stream.text_stream:
                 yield text
 
-    # ─── Gemini ───────────────────────────────────────────────────────
+    # ─── Gemini (New google-genai SDK) ────────────────────────────────
 
     async def _chat_gemini(self, message, system_prompt, model, history):
-        model_name = model or "gemini-2.0-flash"
+        model_name = model or "gemini-2.5-flash"
 
-        # New google-genai Client API
-        if hasattr(self, '_gemini_client') and self._gemini_client:
+        # New google-genai Client API (preferred)
+        if self._gemini_client:
             from google.genai import types
             contents = []
             if history:
@@ -440,10 +447,10 @@ class AIProvider:
         return response.text
 
     async def _stream_gemini(self, message, system_prompt, model, history):
-        model_name = model or "gemini-2.0-flash"
+        model_name = model or "gemini-2.5-flash"
 
         # New google-genai Client API
-        if hasattr(self, '_gemini_client') and self._gemini_client:
+        if self._gemini_client:
             from google.genai import types
             contents = []
             if history:
