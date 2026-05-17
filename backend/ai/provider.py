@@ -5,6 +5,7 @@ Features: retry with exponential backoff, auto-fallback, health pings.
 """
 
 import asyncio
+import re as _re
 import time
 import warnings
 from typing import AsyncGenerator, Optional
@@ -30,6 +31,8 @@ class AIProvider:
         self._health_check_interval = 60  # seconds
         self._max_consecutive_failures = 3
         self._gemini_client = None  # google-genai Client
+        self._last_gemini_request = 0.0  # Rate limiter timestamp
+        self._gemini_min_interval = 3.5  # Min seconds between Gemini requests (free tier: ~20/min)
         self._init_providers()
         log.info(f"AI Provider initialized with default: {settings.DEFAULT_AI_PROVIDER}")
 
@@ -133,30 +136,56 @@ class AIProvider:
 
     async def _retry_with_backoff(self, provider: str, func, *args, **kwargs):
         """
-        Retry logic: 3 attempts, exponential backoff (1s → 2s → 4s).
-        Logs every failure with timestamp + error + attempt number.
+        Retry logic with smart 429 rate-limit detection.
+        For 429 errors: extracts the retry delay from the error message and waits.
+        For other errors: 3 attempts with exponential backoff (1s → 2s → 4s).
         """
-        max_retries = 3
+        max_retries = 4
         base_delay = 1.0
 
         for attempt in range(1, max_retries + 1):
             try:
+                # Rate limiter: space out Gemini requests (free tier = 20/min)
+                if provider == "gemini":
+                    now = time.time()
+                    elapsed = now - self._last_gemini_request
+                    if elapsed < self._gemini_min_interval:
+                        wait_time = self._gemini_min_interval - elapsed
+                        log.debug(f"Rate limiting: waiting {wait_time:.1f}s before Gemini request")
+                        await asyncio.sleep(wait_time)
+                    self._last_gemini_request = time.time()
+
                 result = await func(*args, **kwargs)
                 # Reset failure counter on success
                 self._consecutive_failures[provider] = 0
                 self._health_status[provider] = "ok"
                 return result
             except Exception as e:
-                delay = base_delay * (2 ** (attempt - 1))  # 1s, 2s, 4s
-                log.error(
-                    f"AI provider '{provider}' attempt {attempt}/{max_retries} failed: {e} "
-                    f"(timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')})"
-                )
+                error_str = str(e)
+                is_rate_limit = "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "quota" in error_str.lower()
+
+                # Extract retry delay from error message if available
+                if is_rate_limit:
+                    retry_match = _re.search(r"retry\s+in\s+([\d.]+)s", error_str, _re.IGNORECASE)
+                    if retry_match:
+                        delay = float(retry_match.group(1)) + 1.0  # Add 1s buffer
+                    else:
+                        delay = 8.0 * attempt  # 8s, 16s, 24s, 32s for rate limits
+                    log.warning(
+                        f"Rate limit hit on '{provider}' (attempt {attempt}/{max_retries}). "
+                        f"Waiting {delay:.1f}s before retry..."
+                    )
+                else:
+                    delay = base_delay * (2 ** (attempt - 1))  # 1s, 2s, 4s, 8s
+                    log.error(
+                        f"AI provider '{provider}' attempt {attempt}/{max_retries} failed: {e} "
+                        f"(timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')})"
+                    )
 
                 self._consecutive_failures[provider] = self._consecutive_failures.get(provider, 0) + 1
 
                 if attempt < max_retries:
-                    log.info(f"Retrying in {delay}s...")
+                    log.info(f"Retrying in {delay:.1f}s...")
                     await asyncio.sleep(delay)
                 else:
                     # All retries exhausted

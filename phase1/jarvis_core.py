@@ -187,6 +187,16 @@ class CommandRouter:
             self.speaker.say(f"Goodbye {USER_NAME}. Shutting down.")
             return False
 
+        # -- Chrome profiles listing --
+        if any(phrase in cmd for phrase in ["list profiles", "show profiles", "chrome profiles", "which profiles", "available profiles"]):
+            profiles = self._detect_chrome_profiles()
+            if profiles:
+                names = [p["name"] for p in profiles]
+                self.speaker.say(f"You have {len(names)} Chrome profiles: {', '.join(names[:8])}. Say open chrome with any profile name.")
+            else:
+                self.speaker.say("I couldn't find any Chrome profiles.")
+            return True
+
         # -- App launching --
         if "open" in cmd:
             return self._handle_open(cmd)
@@ -245,6 +255,40 @@ class CommandRouter:
 
     def _handle_open(self, cmd: str) -> bool:
         """Open applications or websites."""
+
+        # ── Chrome with profile detection ──
+        profile_match = re.search(
+            r"open\s+(?:google\s+)?chrome\s+(?:and\s+)?(?:select|use|with|click|load|switch\s+to|go\s+to|choose|pick)\s+(.+?)(?:\s+account|\s+profile)?$",
+            cmd,
+        )
+        if not profile_match:
+            profile_match = re.search(
+                r"open\s+(?:google\s+)?chrome\s+(.+?)\s+(?:profile|account)$",
+                cmd,
+            )
+        if not profile_match:
+            profile_match = re.search(
+                r"open\s+(?:google\s+)?chrome\s+(?:in|on|for)\s+(.+?)(?:\s+account|\s+profile)?$",
+                cmd,
+            )
+        if not profile_match:
+            # "open chrome [name]" — check if name is a known profile
+            simple_match = re.search(r"open\s+(?:google\s+)?chrome\s+(.+)$", cmd)
+            if simple_match:
+                candidate = simple_match.group(1).strip()
+                candidate = re.sub(r"\s+(?:please|for me|for|now)$", "", candidate)
+                # Check against detected profiles
+                detected = self._detect_chrome_profiles()
+                for p in detected:
+                    if candidate.lower() in p["name"].lower() or p["name"].lower().startswith(candidate.lower()):
+                        profile_match = simple_match
+                        break
+
+        if profile_match:
+            profile_name = profile_match.group(1).strip()
+            profile_name = re.sub(r"\s+(?:please|for me|bro|sir|da|di|now)$", "", profile_name)
+            return self._open_chrome_profile(profile_name)
+
         app_map = {
             "chrome": "chrome",
             "browser": "chrome",
@@ -319,6 +363,86 @@ class CommandRouter:
                 self.speaker.say(f"Sorry, I couldn't open {target}.")
         else:
             self.speaker.say("What would you like me to open?")
+        return True
+
+    def _detect_chrome_profiles(self) -> list:
+        """Detect Chrome profiles from Local State file."""
+        profiles = []
+        try:
+            local_state = os.path.expandvars(
+                r"%LOCALAPPDATA%\Google\Chrome\User Data\Local State"
+            )
+            if not os.path.exists(local_state):
+                return profiles
+            with open(local_state, "r", encoding="utf-8") as f:
+                state = json.load(f)
+            info_cache = state.get("profile", {}).get("info_cache", {})
+            for dir_name, data in info_cache.items():
+                name = data.get("gaia_name", "") or data.get("name", dir_name)
+                profiles.append({"name": name, "dir": dir_name})
+        except Exception as e:
+            print(f"[WARN] Chrome profile detection failed: {e}")
+        return profiles
+
+    def _open_chrome_profile(self, target_name: str) -> bool:
+        """Open Chrome with a specific profile."""
+        profiles = self._detect_chrome_profiles()
+
+        # Find matching profile
+        matched = None
+        target_lower = target_name.lower().strip()
+
+        # Exact match
+        for p in profiles:
+            if p["name"].lower() == target_lower:
+                matched = p
+                break
+
+        # Partial match
+        if not matched:
+            for p in profiles:
+                if target_lower in p["name"].lower() or p["name"].lower().startswith(target_lower):
+                    matched = p
+                    break
+
+        # Word-level match
+        if not matched:
+            target_words = set(target_lower.split())
+            for p in profiles:
+                name_words = set(p["name"].lower().split())
+                if target_words & name_words:
+                    matched = p
+                    break
+
+        if not matched:
+            available = [p["name"] for p in profiles]
+            self.speaker.say(
+                f"Profile {target_name} not found. Available profiles are: "
+                + ", ".join(available[:5])
+            )
+            return True
+
+        # Find Chrome executable
+        chrome_paths = [
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+        ]
+        chrome_exe = None
+        for p in chrome_paths:
+            if os.path.exists(p):
+                chrome_exe = p
+                break
+
+        try:
+            if chrome_exe:
+                cmd = f'"{chrome_exe}" --profile-directory="{matched["dir"]}"'
+            else:
+                cmd = f'chrome --profile-directory="{matched["dir"]}"'
+            subprocess.Popen(cmd, shell=True)
+            self.speaker.say(f"Opening Chrome with {matched['name']} profile.")
+        except Exception as e:
+            self.speaker.say(f"Failed to open Chrome profile: {e}")
         return True
 
     def _handle_search(self, cmd: str) -> bool:

@@ -88,17 +88,86 @@ class TaskPlanner:
         self._is_processing = False
 
         # Chrome profile aliases (resolved during planning)
+        # Auto-populated from Chrome + manual aliases
         self._profile_patterns = {
-            "mersal hariharan": "Mersal Hariharan",
-            "hariharan": "Mersal Hariharan",
-            "mersal": "Mersal Hariharan",
-            "personal": "Personal",
+            # Manual aliases for common names
+            "mersal hariharan": "Mersal Hari Haran",
+            "mersal hari haran": "Mersal Hari Haran",
+            "hariharan": "Mersal Hari Haran",
+            "mersal hari": "Mersal Hari Haran",
+            "mersal": "Mersal Hari Haran",
+            "hari dhanu": "hari Dhanu",
+            "hari": "hari Dhanu",
+            "arjundas": "ARJUNDAS",
+            "arjun": "ARJUNDAS",
+            "bengamin": "Bengamin Christopher",
+            "bengamin christopher": "Bengamin Christopher",
+            "christopher": "Bengamin Christopher",
+            "delulu": "Delulu Ma",
+            "dhamodharan": "Dhamodharan S",
+            "dharan": "DHARAN",
+            "dharsithrai": "Dharsithrai",
+            "gopi": "Gopi",
+            "leo": "Leo Leo",
+            "marisankar": "Marisankar",
+            "mari": "Marisankar",
+            "r mari": "R. Mari Sankar",
+            "r. mari": "R. Mari Sankar",
+            "mari sankar": "R. Mari Sankar",
+            "rocky": "Rocky Hari",
+            "rocky hari": "Rocky Hari",
+            "ruby": "Ruby Nest",
+            "ruby nest": "Ruby Nest",
             "work": "Work",
+            "personal": "Personal",
             "school": "School",
             "college": "College",
         }
 
+        # Auto-detect Chrome profiles and merge into patterns
+        self._auto_detect_chrome_profiles()
+
         log.info("Task planner initialized")
+
+    def _auto_detect_chrome_profiles(self):
+        """Auto-detect Chrome profile names from Local State file and add to patterns."""
+        import os
+        try:
+            local_state_path = os.path.expandvars(
+                r"%LOCALAPPDATA%\Google\Chrome\User Data\Local State"
+            )
+            if not os.path.exists(local_state_path):
+                return
+
+            with open(local_state_path, "r", encoding="utf-8") as f:
+                state = json.load(f)
+
+            info_cache = state.get("profile", {}).get("info_cache", {})
+            for dir_name, profile_data in info_cache.items():
+                name = profile_data.get("name", dir_name)
+                gaia_name = profile_data.get("gaia_name", "")
+                display_name = gaia_name or name
+
+                # Add multiple variations for each profile
+                name_lower = display_name.lower().strip()
+                if name_lower and name_lower not in self._profile_patterns:
+                    self._profile_patterns[name_lower] = display_name
+
+                # Also add first name only (if multi-word)
+                words = name_lower.split()
+                if len(words) > 1:
+                    first_name = words[0]
+                    if first_name not in self._profile_patterns and len(first_name) > 2:
+                        self._profile_patterns[first_name] = display_name
+
+                # Add the raw profile name too
+                raw_lower = name.lower().strip()
+                if raw_lower and raw_lower not in self._profile_patterns:
+                    self._profile_patterns[raw_lower] = display_name
+
+            log.info(f"Auto-detected {len(info_cache)} Chrome profiles for voice matching")
+        except Exception as e:
+            log.debug(f"Chrome profile auto-detect skipped: {e}")
 
     # ─── Quick Classification (no AI needed) ──────────────────────────
 
@@ -119,19 +188,100 @@ class TaskPlanner:
         if not text_lower:
             return [{"type": STEP_CONVERSATION, "param": "hello"}]
 
-        # ── Chrome with profile ──
+        # ══════════════════════════════════════════════════════════════
+        # CHROME PROFILE COMMANDS (comprehensive voice patterns)
+        # ══════════════════════════════════════════════════════════════
+
+        # Pattern 1: "open chrome and select/use/with/click/load [profile]"
         profile_match = re.search(
-            r"open\s+chrome\s+(?:and\s+)?(?:select|use|with|load|switch\s+to)\s+(.+?)(?:\s+account|\s+profile)?$",
+            r"open\s+(?:google\s+)?chrome\s+(?:and\s+)?(?:select|use|with|click|load|switch\s+to|go\s+to|choose|pick)\s+(.+?)(?:\s+account|\s+profile)?$",
             text_lower,
         )
+        # Pattern 2: "open chrome [profile] profile/account"
+        if not profile_match:
+            profile_match = re.search(
+                r"open\s+(?:google\s+)?chrome\s+(.+?)\s+(?:profile|account)$",
+                text_lower,
+            )
+        # Pattern 3: "open chrome in [profile]"
+        if not profile_match:
+            profile_match = re.search(
+                r"open\s+(?:google\s+)?chrome\s+(?:in|on|for)\s+(.+?)(?:\s+account|\s+profile)?$",
+                text_lower,
+            )
+        # Pattern 4: "chrome [profile] open pannu" (Tanglish)
+        if not profile_match:
+            profile_match = re.search(
+                r"chrome\s+(.+?)\s+(?:open\s+pannu|thuru|la\s+open\s+pannu)",
+                text_lower,
+            )
+        # Pattern 5: "switch to [profile] profile in chrome"
+        if not profile_match:
+            profile_match = re.search(
+                r"(?:switch|change)\s+(?:to\s+)?(.+?)\s+(?:profile\s+)?(?:in|on)\s+chrome",
+                text_lower,
+            )
+        # Pattern 6: "open [profile] profile in chrome"  or "open [profile] in chrome"
+        if not profile_match:
+            profile_match = re.search(
+                r"open\s+(.+?)\s+(?:profile\s+)?(?:in|on)\s+(?:google\s+)?chrome",
+                text_lower,
+            )
+        # Pattern 7: "chrome open pannu [profile]" (Tanglish)
+        if not profile_match:
+            profile_match = re.search(
+                r"chrome\s+open\s+pannu\s+(.+?)(?:\s+profile|\s+account)?$",
+                text_lower,
+            )
+        # Pattern 8: "[profile] chrome open pannu" (Tanglish, profile first)
+        if not profile_match:
+            profile_match = re.search(
+                r"(.+?)\s+chrome\s+(?:open\s+pannu|thuru)",
+                text_lower,
+            )
+        # Pattern 9: "open chrome [profile]" — name at end without keyword
+        # Only match if the remaining word(s) are a known profile
+        if not profile_match:
+            simple_match = re.search(
+                r"open\s+(?:google\s+)?chrome\s+(.+)$",
+                text_lower,
+            )
+            if simple_match:
+                candidate = simple_match.group(1).strip()
+                # Remove trailing "please", "for me" etc.
+                candidate = re.sub(r"\s+(?:please|for me|for|now)$", "", candidate)
+                # Check if this is a known profile name
+                if candidate in self._profile_patterns or self._fuzzy_match_profile(candidate):
+                    profile_match = simple_match
+
         if profile_match:
             profile_name = profile_match.group(1).strip()
+            # Clean up trailing words
+            profile_name = re.sub(r"\s+(?:please|for me|bro|sir|da|di|now)$", "", profile_name)
             resolved = self._resolve_profile(profile_name)
             return [
-                {"type": STEP_OPEN_APP, "param": "chrome"},
-                {"type": STEP_WAIT, "param": "1"},
                 {"type": STEP_BROWSER_PROFILE, "param": resolved},
             ]
+
+        # ── List Chrome profiles ──
+        if re.search(r"(?:list|show|what(?:'s|\s+are)?)\s+(?:the\s+)?(?:chrome\s+)?profiles?|(?:which|available)\s+profiles?", text_lower):
+            import os
+            try:
+                local_state = os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\User Data\Local State")
+                with open(local_state, "r", encoding="utf-8") as f:
+                    state = json.load(f)
+                info_cache = state.get("profile", {}).get("info_cache", {})
+                names = []
+                for d, data in info_cache.items():
+                    n = data.get("gaia_name", "") or data.get("name", d)
+                    names.append(n)
+                if names:
+                    profile_list = ", ".join(names)
+                    return [{"type": STEP_SPEAK, "param": f"Sir, you have {len(names)} Chrome profiles: {profile_list}. Just say open chrome with any profile name."}]
+                else:
+                    return [{"type": STEP_SPEAK, "param": "Sir, I couldn't find any Chrome profiles."}]
+            except Exception:
+                return [{"type": STEP_SPEAK, "param": "Sir, I couldn't read Chrome profiles right now."}]
 
         # ══════════════════════════════════════════════════════════════
         # TANGLISH COMMANDS (Tamil + English)
@@ -441,7 +591,43 @@ JSON:"""
     def _resolve_profile(self, name: str) -> str:
         """Resolve a spoken profile name to actual Chrome profile name."""
         name_lower = name.lower().strip()
-        return self._profile_patterns.get(name_lower, name.title())
+
+        # Exact match
+        if name_lower in self._profile_patterns:
+            return self._profile_patterns[name_lower]
+
+        # Fuzzy match
+        fuzzy = self._fuzzy_match_profile(name_lower)
+        if fuzzy:
+            return fuzzy
+
+        # Title case fallback
+        return name.title()
+
+    def _fuzzy_match_profile(self, name: str) -> Optional[str]:
+        """Fuzzy match a spoken name against known Chrome profiles."""
+        name_lower = name.lower().strip()
+
+        # Partial match: check if the spoken name is contained in any profile key
+        for key, value in self._profile_patterns.items():
+            if name_lower in key or key in name_lower:
+                return value
+
+        # Word-level overlap match
+        name_words = set(name_lower.split())
+        best_match = None
+        best_score = 0
+        for key, value in self._profile_patterns.items():
+            key_words = set(key.split())
+            overlap = len(name_words & key_words)
+            if overlap > best_score and overlap > 0:
+                best_score = overlap
+                best_match = value
+
+        if best_match and best_score > 0:
+            return best_match
+
+        return None
 
     # ─── Task Queue ───────────────────────────────────────────────────
 
