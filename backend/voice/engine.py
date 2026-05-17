@@ -629,6 +629,12 @@ class VoiceEngine:
         """
         Background listener using SpeechRecognition library (like Phase 1).
         This is a robust fallback when Vosk is missing or Electron blocks mic.
+        
+        RELIABILITY FEATURES:
+        - Auto-restarts on any crash (with exponential backoff)
+        - Heartbeat watchdog detects frozen threads
+        - Mic reconnection on device errors
+        - Consecutive failure tracking with pause before retry
         """
         if not self._mic_available:
             log.warning("Speech recognition loop unavailable — no microphone")
@@ -638,13 +644,17 @@ class VoiceEngine:
             return
 
         self._sr_listener_active = True
+        self._sr_restart_count = 0
+        self._sr_last_heartbeat = time.time()
         log.info("Starting robust backend speech recognition loop (Phase 1 style)...")
 
         # ━━━ CRITICAL: Capture the MAIN event loop BEFORE launching the thread ━━━
-        # asyncio.get_event_loop() inside a thread returns the WRONG loop.
         main_loop = asyncio.get_running_loop()
 
         def _listen_loop():
+            consecutive_errors = 0
+            max_consecutive_errors = 10  # Pause after this many errors in a row
+
             try:
                 import speech_recognition as sr
             except ImportError:
@@ -652,151 +662,233 @@ class VoiceEngine:
                 self._sr_listener_active = False
                 return
 
-            recognizer = sr.Recognizer()
-            recognizer.energy_threshold = 300
-            recognizer.dynamic_energy_threshold = True
-            recognizer.pause_threshold = 0.8
+            while not self._shutdown:
+                recognizer = sr.Recognizer()
+                recognizer.energy_threshold = 300
+                recognizer.dynamic_energy_threshold = True
+                recognizer.pause_threshold = 0.8
 
-            try:
-                mic = sr.Microphone(device_index=self._mic_device_index)
-                with mic as source:
-                    log.info("Calibrating mic for ambient noise...")
-                    recognizer.adjust_for_ambient_noise(source, duration=2)
-                
-                log.info("🎤 Backend listener ready. Say 'JARVIS' to activate.")
+                try:
+                    mic = sr.Microphone(device_index=self._mic_device_index)
+                    with mic as source:
+                        log.info("Calibrating mic for ambient noise...")
+                        recognizer.adjust_for_ambient_noise(source, duration=2)
+                    
+                    log.info("🎤 Backend listener ready. Say 'JARVIS' to activate.")
+                    consecutive_errors = 0  # Reset on successful mic init
 
-                while not self._shutdown:
-                    try:
-                        # ANTI-FEEDBACK: Skip listening while TTS is playing
-                        if self._is_speaking:
-                            time.sleep(0.5)
-                            continue
+                    while not self._shutdown:
+                        try:
+                            # Update heartbeat so watchdog knows we're alive
+                            self._sr_last_heartbeat = time.time()
 
-                        with mic as source:
-                            audio = recognizer.listen(source, timeout=3, phrase_time_limit=10)
-                        
-                        # Double-check speaking flag after recording
-                        if self._is_speaking:
-                            continue
+                            # ANTI-FEEDBACK: Skip listening while TTS is playing
+                            if self._is_speaking:
+                                time.sleep(0.5)
+                                continue
 
-                        # Use Google STT (free, internet required)
-                        text = recognizer.recognize_google(audio).lower().strip()
-                        if not text:
-                            continue
+                            with mic as source:
+                                audio = recognizer.listen(source, timeout=3, phrase_time_limit=10)
+                            
+                            # Double-check speaking flag after recording
+                            if self._is_speaking:
+                                continue
 
-                        # Filter out TTS echo (common JARVIS response fragments)
-                        echo_phrases = [
-                            "yes sir", "i'm listening", "how can i help",
-                            "going offline", "call me anytime", "all systems",
-                            "hey hari", "welcome back",
-                        ]
-                        if any(ep in text for ep in echo_phrases) and not any(w in text for w in ["jarvis"]):
-                            log.debug(f"Filtered echo: '{text}'")
-                            continue
+                            # Use Google STT (free, internet required)
+                            text = recognizer.recognize_google(audio).lower().strip()
+                            if not text:
+                                continue
 
-                        log.info(f"🎤 Heard: '{text}'")
-                        
-                        # Check for wake word
-                        if not self.jarvis_active:
-                            wake_words = ["jarvis", "hey jarvis", "j.a.r.v.i.s"]
-                            if any(w in text for w in wake_words):
-                                # Cooldown check: don't re-trigger within 5 seconds
-                                now = time.time()
-                                if now < self._wake_cooldown_until:
-                                    log.debug(f"Wake word cooldown active, skipping")
-                                    continue
-                                self._wake_cooldown_until = now + 5.0
+                            # Reset error count on successful recognition
+                            consecutive_errors = 0
 
-                                self.jarvis_active = True
-                                log.info("🟢 Wake word detected via SR!")
-                                
-                                # If there's a command after the wake word, process it immediately
-                                cleaned = text.replace("hey jarvis", "").replace("jarvis", "").strip()
-                                if cleaned and len(cleaned) > 2:
-                                    # Direct command — send transcription + process
+                            # Filter out TTS echo (common JARVIS response fragments)
+                            echo_phrases = [
+                                "yes sir", "i'm listening", "how can i help",
+                                "going offline", "call me anytime", "all systems",
+                                "hey hari", "welcome back",
+                            ]
+                            if any(ep in text for ep in echo_phrases) and not any(w in text for w in ["jarvis"]):
+                                log.debug(f"Filtered echo: '{text}'")
+                                continue
+
+                            log.info(f"🎤 Heard: '{text}'")
+                            
+                            # Check for wake word
+                            if not self.jarvis_active:
+                                wake_words = ["jarvis", "hey jarvis", "j.a.r.v.i.s"]
+                                if any(w in text for w in wake_words):
+                                    # Cooldown check: don't re-trigger within 5 seconds
+                                    now = time.time()
+                                    if now < self._wake_cooldown_until:
+                                        log.debug(f"Wake word cooldown active, skipping")
+                                        continue
+                                    self._wake_cooldown_until = now + 5.0
+
+                                    self.jarvis_active = True
+                                    log.info("🟢 Wake word detected via SR!")
+                                    
+                                    # If there's a command after the wake word, process it immediately
+                                    cleaned = text.replace("hey jarvis", "").replace("jarvis", "").strip()
+                                    if cleaned and len(cleaned) > 2:
+                                        # Direct command — send transcription + process
+                                        if self.broadcast_fn:
+                                            asyncio.run_coroutine_threadsafe(
+                                                self.broadcast_fn({
+                                                    "type": "transcription",
+                                                    "data": {"text": cleaned},
+                                                }),
+                                                main_loop,
+                                            )
+                                        if self.on_command:
+                                            asyncio.run_coroutine_threadsafe(
+                                                self.on_command(cleaned),
+                                                main_loop,
+                                            )
+                                    else:
+                                        # Wake word only — notify UI
+                                        if self.broadcast_fn:
+                                            asyncio.run_coroutine_threadsafe(
+                                                self.broadcast_fn({
+                                                    "type": "wake_word",
+                                                    "data": {
+                                                        "text": text,
+                                                        "jarvis_active": True,
+                                                        "message": f"Yes Sir? I'm listening.",
+                                                    },
+                                                }),
+                                                main_loop,
+                                            )
+                                continue
+
+                            # If JARVIS is already active, process as a command
+                            if self.jarvis_active:
+                                # Deactivation checks
+                                if any(phrase in text for phrase in ["stop listening", "go to sleep", "turn off", "deactivate"]):
+                                    self.jarvis_active = False
+                                    self._wake_cooldown_until = time.time() + 5.0
+                                    log.info("🔴 JARVIS deactivated via SR.")
                                     if self.broadcast_fn:
                                         asyncio.run_coroutine_threadsafe(
                                             self.broadcast_fn({
-                                                "type": "transcription",
-                                                "data": {"text": cleaned},
-                                            }),
-                                            main_loop,
-                                        )
-                                    if self.on_command:
-                                        asyncio.run_coroutine_threadsafe(
-                                            self.on_command(cleaned),
-                                            main_loop,
-                                        )
-                                else:
-                                    # Wake word only — notify UI
-                                    if self.broadcast_fn:
-                                        asyncio.run_coroutine_threadsafe(
-                                            self.broadcast_fn({
-                                                "type": "wake_word",
+                                                "type": "clap_event",
                                                 "data": {
-                                                    "text": text,
-                                                    "jarvis_active": True,
-                                                    "message": f"Yes Sir? I'm listening.",
+                                                    "event": "double_clap",
+                                                    "jarvis_active": False,
+                                                    "message": "Going offline Sir. Call me anytime.",
                                                 },
                                             }),
                                             main_loop,
                                         )
-                            continue
-
-                        # If JARVIS is already active, process as a command
-                        if self.jarvis_active:
-                            # Deactivation checks
-                            if any(phrase in text for phrase in ["stop listening", "go to sleep", "turn off", "deactivate"]):
-                                self.jarvis_active = False
-                                self._wake_cooldown_until = time.time() + 5.0
-                                log.info("🔴 JARVIS deactivated via SR.")
+                                    continue
+                                
+                                # Send transcription to UI first
                                 if self.broadcast_fn:
                                     asyncio.run_coroutine_threadsafe(
                                         self.broadcast_fn({
-                                            "type": "clap_event",
-                                            "data": {
-                                                "event": "double_clap",
-                                                "jarvis_active": False,
-                                                "message": "Going offline Sir. Call me anytime.",
-                                            },
+                                            "type": "transcription",
+                                            "data": {"text": text},
                                         }),
                                         main_loop,
                                     )
-                                continue
-                            
-                            # Send transcription to UI first
-                            if self.broadcast_fn:
-                                asyncio.run_coroutine_threadsafe(
-                                    self.broadcast_fn({
-                                        "type": "transcription",
-                                        "data": {"text": text},
-                                    }),
-                                    main_loop,
-                                )
-                            
-                            # Execute command — use captured main_loop
-                            if self.on_command:
-                                asyncio.run_coroutine_threadsafe(
-                                    self.on_command(text),
-                                    main_loop,
-                                )
+                                
+                                # Execute command — use captured main_loop
+                                if self.on_command:
+                                    asyncio.run_coroutine_threadsafe(
+                                        self.on_command(text),
+                                        main_loop,
+                                    )
 
-                    except sr.WaitTimeoutError:
-                        continue
-                    except sr.UnknownValueError:
-                        continue
-                    except sr.RequestError as e:
-                        log.warning(f"Google STT error: {e}")
-                        time.sleep(2)
-                    except Exception as e:
-                        log.warning(f"SR Loop error: {e}")
-                        time.sleep(1)
-                        
-            except Exception as e:
-                log.error(f"Fatal SR loop error: {e}")
-                self._sr_listener_active = False
+                        except sr.WaitTimeoutError:
+                            continue
+                        except sr.UnknownValueError:
+                            continue
+                        except sr.RequestError as e:
+                            consecutive_errors += 1
+                            log.warning(f"Google STT error ({consecutive_errors}x): {e}")
+                            if consecutive_errors >= max_consecutive_errors:
+                                log.warning(f"Too many STT errors ({consecutive_errors}), pausing 30s...")
+                                time.sleep(30)
+                                consecutive_errors = 0
+                            else:
+                                time.sleep(2)
+                        except OSError as e:
+                            # Microphone disconnected / device error
+                            log.error(f"Microphone device error: {e}")
+                            consecutive_errors += 1
+                            break  # Break inner loop to re-init mic
+                        except Exception as e:
+                            consecutive_errors += 1
+                            log.warning(f"SR Loop error ({consecutive_errors}x): {e}")
+                            if consecutive_errors >= max_consecutive_errors:
+                                log.warning(f"Too many SR errors, pausing 30s...")
+                                time.sleep(30)
+                                consecutive_errors = 0
+                            else:
+                                time.sleep(1)
+                            
+                except Exception as e:
+                    log.error(f"SR loop mic init error: {e}")
+
+                # ━━━ AUTO-RESTART with backoff ━━━
+                if not self._shutdown:
+                    self._sr_restart_count += 1
+                    backoff = min(30, 2 ** min(self._sr_restart_count, 5))  # 2, 4, 8, 16, 30, 30...
+                    log.warning(
+                        f"SR loop crashed (restart #{self._sr_restart_count}). "
+                        f"Re-detecting mic and restarting in {backoff}s..."
+                    )
+                    time.sleep(backoff)
+
+                    # Re-detect microphone (may have been unplugged/replugged)
+                    self._detect_mic()
+                    if not self._mic_available:
+                        log.warning("Mic not found on re-detect. Will retry in 10s...")
+                        time.sleep(10)
+                        self._detect_mic()
+                        if not self._mic_available:
+                            log.error("Mic still unavailable. SR loop stopping.")
+                            break
+
+            self._sr_listener_active = False
+            log.info("SR loop thread exiting.")
 
         threading.Thread(target=_listen_loop, daemon=True, name="jarvis-sr-loop").start()
+
+        # ━━━ Heartbeat Watchdog: restart SR loop if it freezes ━━━
+        asyncio.create_task(self._sr_watchdog(main_loop))
+
+    async def _sr_watchdog(self, main_loop):
+        """
+        Watchdog that monitors the SR listener thread.
+        If the thread hasn't sent a heartbeat in 60s, force-restart it.
+        """
+        log.info("SR watchdog started — monitoring listener health every 30s")
+        while not self._shutdown:
+            await asyncio.sleep(30)
+
+            if not self._sr_listener_active:
+                # SR loop died and didn't restart itself
+                log.warning("⚠ SR watchdog: listener is DEAD. Attempting restart...")
+                self._detect_mic()
+                if self._mic_available:
+                    await self.start_speech_recognition_loop()
+                else:
+                    log.warning("SR watchdog: no mic available, will check again in 30s")
+                continue
+
+            # Check heartbeat freshness
+            if hasattr(self, '_sr_last_heartbeat'):
+                elapsed = time.time() - self._sr_last_heartbeat
+                if elapsed > 60:
+                    log.warning(
+                        f"⚠ SR watchdog: no heartbeat for {elapsed:.0f}s — listener may be frozen. "
+                        f"Forcing restart..."
+                    )
+                    # Mark as dead so next iteration restarts it
+                    self._sr_listener_active = False
+
+        log.info("SR watchdog stopped.")
 
     # ─── Record Audio ─────────────────────────────────────────────────
 
