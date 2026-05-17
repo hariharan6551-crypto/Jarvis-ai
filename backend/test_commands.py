@@ -1,7 +1,7 @@
 """Quick test for all critical JARVIS commands."""
 import requests
 
-API = "http://127.0.0.1:8766/api/command"
+API = "http://127.0.0.1:8765/api/command"
 
 tests = [
     "open whatsapp",

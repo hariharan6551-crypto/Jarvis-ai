@@ -90,7 +90,7 @@ async function speakBackend(text) {
   // Set speaking flag to mute mic during TTS
   useStore.getState().setIsSpeaking(true);
   try {
-    const res = await fetch('http://127.0.0.1:8766/api/tts', {
+    const res = await fetch('http://127.0.0.1:8765/api/tts', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text }),
@@ -122,7 +122,7 @@ async function speakBackend(text) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-//  VOICE RECOGNITION ENGINE v3.1 — Bulletproof + No Notification Spam
+//  VOICE RECOGNITION ENGINE v3.2 — Anti-Echo + Cooldown + Smart Filters
 // ═══════════════════════════════════════════════════════════════════
 
 // Global voice state
@@ -130,7 +130,15 @@ let _voiceRecInstance = null;
 let _voiceRestartCount = 0;
 let _voiceHeartbeatInterval = null;
 let _voiceLastResultTime = 0;
-let _micBlockedNotified = false; // Prevent notification spam
+let _micBlockedNotified = false;
+let _wakeWordCooldownUntil = 0;  // Prevent rapid re-trigger
+
+// Common JARVIS response phrases that the mic picks up (echo filter)
+const ECHO_PHRASES = [
+  'yes sir', "i'm listening", 'how can i help', 'going offline',
+  'call me anytime', 'all systems', 'welcome back', 'hey hari',
+  'good morning', 'good afternoon', 'good evening',
+];
 
 function startVoiceRecognition() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -154,7 +162,7 @@ function startVoiceRecognition() {
   rec.onstart = () => {
     useStore.getState().setRecording(true);
     _voiceRestartCount = 0;
-    _micBlockedNotified = false; // Reset on successful start
+    _micBlockedNotified = false;
     console.log('Voice recognition STARTED');
   };
 
@@ -162,7 +170,7 @@ function startVoiceRecognition() {
     _voiceLastResultTime = Date.now();
     const store = useStore.getState();
 
-    // ANTI-FEEDBACK: Skip processing while JARVIS is speaking
+    // ANTI-FEEDBACK: Skip ALL processing while JARVIS is speaking
     if (store.isSpeaking) return;
 
     for (let i = event.resultIndex; i < event.results.length; i++) {
@@ -171,6 +179,12 @@ function startVoiceRecognition() {
       const lower = transcript.toLowerCase();
 
       if (!lower || lower.length < 2) continue;
+
+      // ECHO FILTER: If the heard text matches common JARVIS responses, skip it
+      if (isFinal && ECHO_PHRASES.some(ep => lower.includes(ep)) && !/jarvis/i.test(lower)) {
+        console.log('Voice: filtered echo ->', lower);
+        continue;
+      }
 
       // Check ALL alternatives for wake word
       let hasWakeWord = /jarvis|j[.\s]*a[.\s]*r[.\s]*v[.\s]*i[.\s]*s/i.test(lower);
@@ -189,16 +203,27 @@ function startVoiceRecognition() {
         store.setJarvisActive(false);
         store.setAiState('idle');
         wakeWordTriggeredThisPhrase = false;
+        _wakeWordCooldownUntil = Date.now() + 5000;
         store.addChatMessage({ role: 'assistant', content: 'Going offline, Sir. Call me anytime.' });
         speakBackend('Going offline, Sir. Call me anytime.');
         return;
       }
 
-      // 2. WAKE WORD DETECTION
+      // 2. WAKE WORD DETECTION (with cooldown)
       if (hasWakeWord && !wakeWordTriggeredThisPhrase) {
+        // Cooldown check: don't re-trigger within 5 seconds
+        if (Date.now() < _wakeWordCooldownUntil) {
+          console.log('Voice: wake word cooldown active, skipping');
+          continue;
+        }
+
         wakeWordTriggeredThisPhrase = true;
+        
+        // Only activate + acknowledge if JARVIS wasn't already active
+        const wasAlreadyActive = store.jarvisActive;
         store.setJarvisActive(true);
         store.setAiState('listening');
+
         if (!isFinal) continue;
       }
 
@@ -207,6 +232,8 @@ function startVoiceRecognition() {
       // 3. WAKE WORD + COMMAND IN SAME PHRASE
       if (wakeWordTriggeredThisPhrase) {
         wakeWordTriggeredThisPhrase = false;
+        _wakeWordCooldownUntil = Date.now() + 5000; // Set cooldown
+
         const cleaned = lower
           .replace(/hey\s+(jarvis|j[.\s]*a[.\s]*r[.\s]*v[.\s]*i[.\s]*s)|(jarvis|j[.\s]*a[.\s]*r[.\s]*v[.\s]*i[.\s]*s)/gi, '')
           .replace(/^\s*[,.\s]+/, '')
@@ -215,6 +242,7 @@ function startVoiceRecognition() {
         if (cleaned && cleaned.length > 1) {
           store.sendCommand(cleaned);
         } else {
+          // Just the wake word — only acknowledge if not already active
           store.addChatMessage({ role: 'assistant', content: 'Yes Sir, I\'m listening.' });
           speakBackend('Yes Sir, I\'m listening.');
         }
@@ -235,7 +263,6 @@ function startVoiceRecognition() {
     if (event.error === 'no-speech' || event.error === 'aborted') return;
     console.warn('Voice error:', event.error);
     if (event.error === 'not-allowed') {
-      // Only show mic blocked toast ONCE
       if (!_micBlockedNotified) {
         showToast({ title: 'Microphone Access', message: 'Allow microphone in browser settings for voice commands.', type: 'warning', duration: 6000 });
         _micBlockedNotified = true;

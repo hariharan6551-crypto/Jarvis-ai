@@ -4,8 +4,8 @@ const useStore = create((set, get) => ({
   // Connection
   ws: null,
   connected: false,
-  backendUrl: 'ws://127.0.0.1:8766/ws',
-  apiUrl: 'http://127.0.0.1:8766',
+  backendUrl: 'ws://127.0.0.1:8765/ws',
+  apiUrl: 'http://127.0.0.1:8765',
 
   // UI State
   currentPage: 'home',
@@ -212,12 +212,18 @@ const useStore = create((set, get) => ({
       }
 
     } else if (type === 'wake_word') {
-      // ━━━ WAKE WORD FROM BACKEND (Vosk) ━━━
+      // ━━━ WAKE WORD FROM BACKEND (Vosk/SR) ━━━
       const d = data.data;
+      const wasAlreadyActive = get().jarvisActive;
       set({ jarvisActive: true, aiState: 'listening' });
-      console.log('🗣️ Wake word detected:', d.text);
-      get().addChatMessage({ role: 'assistant', content: d.message || 'Hey Hari, how can I help you?' });
-      get().speakBackend(d.message || 'Hey Hari, how can I help you?');
+      console.log('🗣️ Wake word detected (backend):', d.text);
+      // Only acknowledge if JARVIS wasn't already active (prevents echo from dual recognition)
+      if (!wasAlreadyActive) {
+        get().addChatMessage({ role: 'assistant', content: d.message || 'Hey Hari, how can I help you?' });
+        // Don't speakBackend here — the backend SR loop already triggered this,
+        // and speaking would cause the mic to pick it up again
+      }
+      get()._startAutoDeactivateTimer();
 
     } else if (type === 'status') {
       set({

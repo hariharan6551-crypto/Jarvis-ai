@@ -47,6 +47,8 @@ class VoiceEngine:
         self._wake_word_task = None
         self._is_listening = False
         self._shutdown = False
+        self._is_speaking = False
+        self._wake_cooldown_until = 0
 
         # JARVIS active state
         self.jarvis_active = False
@@ -276,6 +278,7 @@ class VoiceEngine:
         """Convert text to speech audio bytes. Auto-reinit on crash."""
         if not text or not text.strip():
             return None
+        self._is_speaking = True
         start = time.time()
         try:
             if settings.TTS_PROVIDER == "edge":
@@ -291,17 +294,27 @@ class VoiceEngine:
             elapsed = (time.time() - start) * 1000
             if audio:
                 log.debug(f"TTS generated {len(audio)} bytes in {elapsed:.0f}ms")
+            # Keep _is_speaking=True for a bit so mic doesn't pick up tail-end
+            asyncio.get_event_loop().call_later(2.0, self._clear_speaking)
             return audio
         except Exception as e:
             log.error(f"TTS failed: {e}")
+            self._is_speaking = False
             # Auto-reinitialize on crash
             self._reinit_tts()
             # Try one more time with edge-tts as fallback
             try:
-                return await self._speak_edge_tts(text)
+                result = await self._speak_edge_tts(text)
+                asyncio.get_event_loop().call_later(2.0, self._clear_speaking)
+                return result
             except Exception as e2:
                 log.error(f"TTS fallback also failed: {e2}")
+                self._is_speaking = False
                 return None
+
+    def _clear_speaking(self):
+        """Clear the speaking flag after TTS finishes (with delay for mic)."""
+        self._is_speaking = False
 
     async def _speak_edge_tts(self, text: str) -> bytes:
         """Generate speech using Edge TTS (free, high quality)."""
@@ -654,12 +667,31 @@ class VoiceEngine:
 
                 while not self._shutdown:
                     try:
+                        # ANTI-FEEDBACK: Skip listening while TTS is playing
+                        if self._is_speaking:
+                            time.sleep(0.5)
+                            continue
+
                         with mic as source:
                             audio = recognizer.listen(source, timeout=3, phrase_time_limit=10)
                         
+                        # Double-check speaking flag after recording
+                        if self._is_speaking:
+                            continue
+
                         # Use Google STT (free, internet required)
                         text = recognizer.recognize_google(audio).lower().strip()
                         if not text:
+                            continue
+
+                        # Filter out TTS echo (common JARVIS response fragments)
+                        echo_phrases = [
+                            "yes sir", "i'm listening", "how can i help",
+                            "going offline", "call me anytime", "all systems",
+                            "hey hari", "welcome back",
+                        ]
+                        if any(ep in text for ep in echo_phrases) and not any(w in text for w in ["jarvis"]):
+                            log.debug(f"Filtered echo: '{text}'")
                             continue
 
                         log.info(f"🎤 Heard: '{text}'")
@@ -668,29 +700,45 @@ class VoiceEngine:
                         if not self.jarvis_active:
                             wake_words = ["jarvis", "hey jarvis", "j.a.r.v.i.s"]
                             if any(w in text for w in wake_words):
+                                # Cooldown check: don't re-trigger within 5 seconds
+                                now = time.time()
+                                if now < self._wake_cooldown_until:
+                                    log.debug(f"Wake word cooldown active, skipping")
+                                    continue
+                                self._wake_cooldown_until = now + 5.0
+
                                 self.jarvis_active = True
                                 log.info("🟢 Wake word detected via SR!")
                                 
-                                # Broadcast wake word to UI — use captured main_loop
-                                if self.broadcast_fn:
-                                    asyncio.run_coroutine_threadsafe(
-                                        self.broadcast_fn({
-                                            "type": "wake_word",
-                                            "data": {
-                                                "text": text,
-                                                "jarvis_active": True,
-                                                "message": f"Yes Sir? I'm listening.",
-                                            },
-                                        }),
-                                        main_loop,
-                                    )
-                                    
                                 # If there's a command after the wake word, process it immediately
                                 cleaned = text.replace("hey jarvis", "").replace("jarvis", "").strip()
                                 if cleaned and len(cleaned) > 2:
+                                    # Direct command — send transcription + process
+                                    if self.broadcast_fn:
+                                        asyncio.run_coroutine_threadsafe(
+                                            self.broadcast_fn({
+                                                "type": "transcription",
+                                                "data": {"text": cleaned},
+                                            }),
+                                            main_loop,
+                                        )
                                     if self.on_command:
                                         asyncio.run_coroutine_threadsafe(
                                             self.on_command(cleaned),
+                                            main_loop,
+                                        )
+                                else:
+                                    # Wake word only — notify UI
+                                    if self.broadcast_fn:
+                                        asyncio.run_coroutine_threadsafe(
+                                            self.broadcast_fn({
+                                                "type": "wake_word",
+                                                "data": {
+                                                    "text": text,
+                                                    "jarvis_active": True,
+                                                    "message": f"Yes Sir? I'm listening.",
+                                                },
+                                            }),
                                             main_loop,
                                         )
                             continue
@@ -700,6 +748,7 @@ class VoiceEngine:
                             # Deactivation checks
                             if any(phrase in text for phrase in ["stop listening", "go to sleep", "turn off", "deactivate"]):
                                 self.jarvis_active = False
+                                self._wake_cooldown_until = time.time() + 5.0
                                 log.info("🔴 JARVIS deactivated via SR.")
                                 if self.broadcast_fn:
                                     asyncio.run_coroutine_threadsafe(
@@ -714,6 +763,16 @@ class VoiceEngine:
                                         main_loop,
                                     )
                                 continue
+                            
+                            # Send transcription to UI first
+                            if self.broadcast_fn:
+                                asyncio.run_coroutine_threadsafe(
+                                    self.broadcast_fn({
+                                        "type": "transcription",
+                                        "data": {"text": text},
+                                    }),
+                                    main_loop,
+                                )
                             
                             # Execute command — use captured main_loop
                             if self.on_command:

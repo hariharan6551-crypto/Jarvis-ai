@@ -3,7 +3,7 @@
     {
       "name": "Default",
       "files": [
-        "scripts/install.bat"
+        "launcher.py"
       ]
     }
   ],
